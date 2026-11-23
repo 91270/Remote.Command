@@ -1,0 +1,116 @@
+name: Verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the versioned Gateway image and release files
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep procps
+      - if: runner.os == 'macOS'
+        run: brew install ripgrep
+      - if: runner.os == 'Windows'
+        run: choco install ripgrep -y --no-progress
+      - run: npm ci --ignore-scripts
+      - name: Test complete Agent and Gateway
+        run: npm test
+        env:
+          PRM_TEST_FULL: '1'
+          PRM_TEST_LAUNCH: '1'
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build and start Gateway on the Compose private network
+        run: |
+          npm run setup -- mcp.invalid.example
+          trap 'docker compose down -v' EXIT
+          docker compose config -q
+          docker compose up --build -d --wait --wait-timeout 40 gateway
+          docker compose exec -T gateway node -e "fetch('http://127.0.0.1:8787/.well-known/oauth-protected-resource/mcp').then(async r => { if (!r.ok || (await r.json()).resource !== process.env.PUBLIC_ORIGIN + '/mcp') process.exit(1); })"
+          npm run backup -- "$RUNNER_TEMP/rcm.sqlite"
+          docker compose exec -T gateway node dist/admin.js verify-backup < "$RUNNER_TEMP/rcm.sqlite"
+          docker compose run --rm --no-deps -T -e STATE_DB=/data/restored.sqlite gateway node dist/admin.js restore < "$RUNNER_TEMP/rcm.sqlite"
+  package:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [test, compose]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run package:release -- --with-image
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-command-release
+          path: releases/remote-command-*
+          if-no-files-found: error
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    needs: package
+    runs-on: ubuntu-latest
+    concurrency:
+      group: publish-release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: remote-command-release
+          path: releases
+      - name: Publish the Gateway image and release files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          tag="v$version"
+          stem="remote-command-$version"
+          repository=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$repository:$version"
+          cd releases
+          sha256sum -c "$stem-SHA256SUMS"
+          files=("$stem.tgz" "$stem-deploy.tar.gz" "$stem-gateway-linux-amd64.tar.gz" "$stem-SHA256SUMS")
+
+          if release=$(gh release view "$tag" --json isDraft,targetCommitish --repo "$GITHUB_REPOSITORY"); then
+            jq -e --arg commit "$GITHUB_SHA" '.isDraft and .targetCommitish == $commit' <<< "$release" >/dev/null
+            gh release upload "$tag" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" "${files[@]}" --draft --target "$GITHUB_SHA" \
+              --title "Remote.Command $version" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
+
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          docker image load -i "$stem-gateway-linux-amd64.tar.gz"
+          docker tag "remote-command:$version" "$image"
+          docker push "$image"
+          gh release edit "$tag" --draft=false --repo "$GITHUB_REPOSITORY"

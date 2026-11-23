@@ -1,0 +1,60 @@
+# Retain the project and volume identifiers used before the directory move.
+name: private-remote-mcp
+
+services:
+  gateway:
+    image: ${RCM_GATEWAY_IMAGE:-private-remote-mcp-gateway}
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 25s
+    logging:
+      driver: local
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Run npm run setup first}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:?Run npm run setup first}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?Run npm run setup first}
+      OWNER_KEY: ${OWNER_KEY:?Run npm run setup first}
+      OAUTH_REDIRECT_URIS: ${OAUTH_REDIRECT_URIS:?Run npm run setup first}
+      STATE_DB: ${STATE_DB:-/data/gateway.sqlite}
+      RCM_TASK_RETENTION_DAYS: ${RCM_TASK_RETENTION_DAYS:-7}
+      RCM_AUDIT_RETENTION_DAYS: ${RCM_AUDIT_RETENTION_DAYS:-90}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - gateway-data:/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    logging:
+      driver: local
+    environment:
+      DOMAIN: ${DOMAIN:?Run npm run setup first}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge, backend]
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+networks:
+  edge: {}
+  backend:
+    internal: true
+volumes:
+  gateway-data: {}
+  caddy-data: {}
+  caddy-config: {}

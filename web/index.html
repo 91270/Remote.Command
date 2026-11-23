@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Remote.Command · 控制台</title>
+  <link rel="stylesheet" href="/manage/assets/dashboard.css">
+  <script src="/manage/assets/dashboard.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-view">
+    <div class="login-intro">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote.Command</span></div>
+      <h1>连接你的<br>本地设备</h1>
+      <p>配对工作设备后，通过自建 Gateway 在 ChatGPT 中使用本地文件、搜索和终端。</p>
+      <div class="connection-map" aria-label="ChatGPT 连接自建 Gateway，设备主动连接 Gateway">
+        <span>ChatGPT</span><i aria-hidden="true"></i><span>Gateway</span><i aria-hidden="true"></i><span>设备</span>
+      </div>
+    </div>
+    <div class="login-main">
+      <form id="login-form" class="login-card">
+        <h2>登录控制台</h2>
+        <p>输入部署时生成的 Owner key。</p>
+        <label for="owner-key">Owner key</label>
+        <input id="owner-key" name="ownerKey" type="password" required autocomplete="off">
+        <button type="submit" class="primary">登录</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-view" class="app" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/manage"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote Command<span class="brand-sub">MCP 控制台</span></span></a>
+      <nav aria-label="控制台导航">
+        <button type="button" class="nav-link active" data-panel="devices" aria-current="page"><span aria-hidden="true">▣</span>设备</button>
+        <button type="button" class="nav-link" data-panel="tasks"><span aria-hidden="true">≡</span>任务</button>
+        <button type="button" class="nav-link" data-panel="audit"><span aria-hidden="true">◷</span>审计</button>
+        <button type="button" class="nav-link" data-panel="connect"><span aria-hidden="true">↗</span>接入 ChatGPT</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div><span class="connection-dot" aria-hidden="true"></span><span>自建 Gateway</span></div>
+        <code id="gateway-host"></code>
+        <button id="logout" class="text-button" type="button">退出登录</button>
+      </div>
+    </aside>
+
+    <main id="console-main">
+      <header class="page-header">
+        <div><h1 id="page-title">设备</h1><p id="page-description">连接和管理可供 ChatGPT 使用的工作设备。</p></div>
+        <div class="refresh-group"><span id="last-refresh"></span><button id="refresh-now" type="button" class="secondary">刷新</button></div>
+      </header>
+      <div id="notice" class="notice" hidden role="status"></div>
+
+      <section id="panel-devices" class="panel" aria-label="设备">
+        <div class="stats" aria-label="设备与任务概况">
+          <article><p>在线设备</p><strong id="stat-online">—</strong><span id="stat-paired">等待连接</span></article>
+          <article><p>待本机确认</p><strong id="stat-approval">—</strong><span id="stat-active">等待任务数据</span></article>
+          <article><p>工具调用</p><strong id="stat-calls">—</strong><span>累计任务记录</span></article>
+        </div>
+        <div class="section-heading">
+          <div><h2>已配对设备</h2><p id="device-count"></p></div>
+          <div class="heading-actions"><button id="revoke-all-devices" type="button" class="danger">撤销全部设备</button><button id="verify-device" type="button" class="secondary">输入配对码</button><button id="new-device" type="button" class="primary">添加设备</button></div>
+        </div>
+        <div id="device-filters" class="filters" hidden>
+          <input id="device-search" type="search" aria-label="搜索设备" placeholder="搜索名称或设备 ID">
+          <select id="device-status" aria-label="按在线状态筛选"><option value="">所有状态</option><option value="online">在线</option><option value="offline">离线</option><option value="revoked">已撤销</option></select>
+        </div>
+        <div id="devices" class="device-grid" aria-live="polite"></div>
+        <div class="device-overview">
+          <article class="card recent-card">
+            <div class="section-heading"><h2>最近调用</h2><button id="view-all-tasks" type="button" class="text-button">全部任务 →</button></div>
+            <div id="recent-tasks" class="recent-tasks"></div>
+          </article>
+          <article class="card gateway-card">
+            <h2>ChatGPT 接入</h2>
+            <p>将此地址添加为自定义 MCP Server。</p>
+            <div class="copy-field"><code id="overview-mcp-url"></code><button id="copy-overview-mcp" type="button" class="secondary">复制</button></div>
+            <button id="view-connect" type="button" class="text-button">查看 OAuth 设置 →</button>
+          </article>
+        </div>
+      </section>
+
+      <section id="panel-tasks" class="panel" aria-label="任务" hidden>
+        <div class="section-heading">
+          <div><h2>最近任务</h2><p>查看结果、审批状态和取消进度。</p></div>
+          <div class="heading-actions filters">
+            <select id="task-device" aria-label="筛选任务设备"><option value="">所有设备</option></select>
+            <select id="task-status" aria-label="筛选任务状态"><option value="">所有状态</option><option value="active">进行中</option><option value="awaiting_approval">待本机确认</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
+          </div>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">工具</th><th scope="col">设备</th><th scope="col">状态</th><th scope="col">创建时间</th><th scope="col">操作</th></tr></thead><tbody id="tasks"></tbody></table></div>
+      </section>
+
+      <section id="panel-audit" class="panel" aria-label="审计" hidden>
+        <div class="section-heading"><div><h2>操作审计</h2><p>查看配对、权限变更和任务生命周期。</p></div><input id="audit-search" type="search" aria-label="搜索审计" placeholder="搜索事件名称或 ID"></div>
+        <div class="table-wrap"><table><thead><tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">详细信息</th></tr></thead><tbody id="audit"></tbody></table></div>
+      </section>
+
+      <section id="panel-connect" class="panel" aria-label="接入 ChatGPT" hidden>
+        <div class="connection-layout">
+          <article class="card">
+            <h2>MCP Server</h2>
+            <p>在 ChatGPT 中添加自定义 MCP Server。</p>
+            <div class="copy-field"><code id="mcp-url"></code><button id="copy-mcp" type="button" class="secondary">复制地址</button></div>
+            <ol class="steps">
+              <li>选择 OAuth 认证，填写 Gateway 部署配置中的客户端 ID 和 secret。</li>
+              <li>核对 ChatGPT 显示的回调地址和 Gateway 的允许列表。</li>
+              <li>打开授权页，输入 Owner key，完成连接。</li>
+            </ol>
+          </article>
+          <article class="card">
+            <h2>在对话里使用设备</h2>
+            <p>先列出设备，再选择设备或在调用中指定设备 ID。</p>
+            <pre>列出我的设备。<br>读取这台设备工作区里的 hello.txt。<br>查看最近的后台任务。</pre>
+            <p>设备端确认写入、配置修改和命令执行。</p>
+            <button id="revoke-oauth" type="button" class="danger">撤销全部 ChatGPT 授权</button>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="start-device-dialog" aria-labelledby="start-device-title">
+    <div class="dialog-heading"><h2 id="start-device-title">添加设备</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+    <p>在要连接的设备上安装 Node.js 24 至 26，然后在终端运行这条命令。</p>
+    <div class="copy-field"><code id="device-start-command">npx --yes --ignore-scripts --package=https://github.com/91270/Remote.Command/releases/download/v0.4.1/remote-command-0.4.1.tgz remote-command remote</code><button id="copy-device-start" type="button" class="secondary">复制命令</button></div>
+    <p>首次运行填写的 Gateway 地址</p>
+    <div class="copy-field"><code id="device-gateway-url"></code><button id="copy-gateway" type="button" class="secondary">复制地址</button></div>
+    <p>客户端会打开浏览器配对。也可以手动输入终端显示的配对码。</p>
+    <div class="dialog-actions"><button id="pair-with-invite" type="button" class="text-button">使用一次性令牌</button><button id="start-enter-code" type="button" class="primary">输入配对码</button></div>
+  </dialog>
+
+  <dialog id="pair-dialog" aria-labelledby="pair-title">
+    <form id="pair-form">
+      <div class="dialog-heading"><h2 id="pair-title">创建一次性令牌</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+      <label for="device-name">设备名称</label><input id="device-name" name="name" maxlength="80" required>
+      <fieldset><legend>设备权限</legend>
+        <label class="check"><input type="checkbox" name="capabilities" value="read" checked>读取与搜索</label>
+        <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
+        <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
+      </fieldset>
+      <button class="primary" type="submit">生成令牌</button>
+    </form>
+    <div id="pair-result" hidden>
+      <div class="dialog-heading"><h2>在设备上配对</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+      <p>在本机运行配对命令，按提示输入令牌。令牌只能使用一次。</p>
+      <pre>node dist/agent.js pair agent.local.json</pre>
+      <div class="copy-field"><code id="pair-token"></code><button id="copy-token" type="button" class="secondary">复制令牌</button></div>
+      <p id="pair-expiry"></p><button id="pair-done" type="button" class="primary">完成</button>
+    </div>
+  </dialog>
+
+  <dialog id="verify-dialog" aria-labelledby="verify-title">
+    <form id="verify-form">
+      <div class="dialog-heading"><h2 id="verify-title">确认设备配对</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+      <label for="verify-code">终端显示的配对码</label>
+      <div class="input-row"><input id="verify-code" name="user_code" required maxlength="32" autocomplete="off" placeholder="ABCDE-FGHIJ"><button id="lookup-device" type="button" class="secondary">核对设备</button></div>
+      <div id="verify-details" hidden>
+        <div class="pairing-preview"><span>请求配对的设备</span><strong id="verify-host"></strong><small id="verify-expiry"></small></div>
+        <label for="verify-name">设备显示名称（可选）</label>
+        <input id="verify-name" name="name" maxlength="80">
+        <fieldset><legend>授予设备的权限</legend>
+          <label class="check"><input type="checkbox" name="capabilities" value="read" checked>读取与搜索</label>
+          <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
+          <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
+        </fieldset>
+        <p>设备本地配置也会限制实际权限。</p>
+      </div>
+      <p id="verify-error" class="error" role="alert"></p>
+      <div id="verify-actions" class="dialog-actions" hidden><button id="deny-device" type="button" class="danger">拒绝</button><button type="submit" class="primary">授权设备</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="task-dialog" class="wide-dialog" aria-labelledby="task-title">
+    <div class="dialog-heading"><h2 id="task-title">任务详情</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+    <div class="task-information"><span id="task-detail-status"></span><p id="task-meta"></p></div>
+    <div class="copy-field"><code id="task-id"></code><button id="copy-task-id" type="button" class="secondary">复制任务 ID</button></div>
+    <p id="task-approval" class="notice" hidden>请在操作设备的终端查看请求并确认。</p>
+    <h3>结果</h3>
+    <pre id="task-output" class="output"></pre>
+    <div class="dialog-actions"><button id="cancel-task" type="button" class="danger">请求取消任务</button></div>
+  </dialog>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <div class="dialog-heading"><h2 id="confirm-title"></h2><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
+      <p id="confirm-description"></p>
+      <label id="rename-label" for="rename-value" hidden>设备名称</label><input id="rename-value" maxlength="80" hidden>
+      <div class="dialog-actions"><button value="cancel" class="secondary">返回</button><button id="confirm-submit" value="confirm" class="primary">确认</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

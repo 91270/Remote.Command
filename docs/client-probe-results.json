@@ -1,0 +1,77 @@
+{
+  "generatedAt": "2026-11-17T15:47:24.820Z",
+  "artifact": "Desktop Commander npm 0.3.3",
+  "module": "dist/remote-device/device-authenticator.js",
+  "sha256": "5bbeb50e65018480a698dcaa85548939aef8412783b41b88abfa849adbce79be",
+  "method": "Official shipped class with side-effect imports stubbed and fetch/open/capture dependencies injected.",
+  "checks": {
+    "s256Pkce": "passed",
+    "deviceStart": "passed",
+    "pendingRetry": "passed",
+    "slowDownRetry": "passed",
+    "http502Retry": "passed",
+    "tokenResult": "passed",
+    "accessDeniedTerminal": "passed",
+    "redirectError": "passed"
+  },
+  "observedRequests": [
+    {
+      "path": "/device/start",
+      "redirect": "error",
+      "fields": [
+        "client_id",
+        "scope",
+        "device_name",
+        "device_type",
+        "code_challenge",
+        "code_challenge_method"
+      ]
+    },
+    {
+      "path": "/device/poll",
+      "redirect": "error",
+      "fields": [
+        "device_code",
+        "client_id",
+        "code_verifier"
+      ]
+    },
+    {
+      "path": "/device/poll",
+      "redirect": "error",
+      "fields": [
+        "device_code",
+        "client_id",
+        "code_verifier"
+      ]
+    },
+    {
+      "path": "/device/poll",
+      "redirect": "error",
+      "fields": [
+        "device_code",
+        "client_id",
+        "code_verifier"
+      ]
+    },
+    {
+      "path": "/device/poll",
+      "redirect": "error",
+      "fields": [
+        "device_code",
+        "client_id",
+        "code_verifier"
+      ]
+    }
+  ],
+  "sleepIntervals": [
+    1000,
+    1000,
+    1000,
+    1000,
+    1000
+  ],
+  "limitations": [
+    "Offline injected responses. The official cloud service, refresh-token backend and MQTT connection were not executed."
+  ]
+}

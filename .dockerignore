@@ -1,0 +1,16 @@
+**
+!package.json
+!package-lock.json
+!.npmrc
+!tsconfig.json
+!src/
+!src/**
+!vendor/
+!vendor/**
+!web/
+!web/**
+!deploy/
+!deploy/gateway/
+!deploy/gateway/**
+**/._*
+**/.DS_Store

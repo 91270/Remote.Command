@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-11-18T11:49:25.673Z",
+  "artifact": "@wonderwhy-er/desktop-commander@0.3.3",
+  "module": "dist/remote-device/desktop-commander-integration.js",
+  "sha256": "7231a403268873bb924219381919190ab0b789134fb05ba7ae3b818cb519ccd7",
+  "checks": {
+    "realStdioDiscovery": "passed",
+    "inputAndMetadataForwarding": "passed",
+    "imageAndStructuredResult": "passed",
+    "inFlightChildExit": "passed",
+    "singleRestartForConcurrentCalls": "passed",
+    "noRestartAfterIntentionalShutdown": "passed"
+  },
+  "limitations": [
+    "The shipped bridge started an isolated local MCP fixture through its normal development-path resolver.",
+    "Official telemetry and fallback lookup of an existing installation were stubbed. This probe did not connect to a hosted backend."
+  ]
+}

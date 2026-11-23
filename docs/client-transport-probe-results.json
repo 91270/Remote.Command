@@ -1,0 +1,16 @@
+{
+  "artifact": "@wonderwhy-er/desktop-commander@0.3.4",
+  "module": "dist/remote-device/remote-channel.js",
+  "sha256": "4d5aa2f5e9f74043587496a7b57a223d200992855a4db8ae150e0b68567c7fec",
+  "checks": [
+    "broadcastEntersDispatch",
+    "mqttReceiptDoesNotEnterDispatch",
+    "sessionLossStopsDispatch",
+    "readinessIndependentOfMqtt",
+    "mqttRolloutCheckedBeforeAndAfterEnrollment",
+    "resultWriteBeforeNotification",
+    "nulRemovedFromResult",
+    "richWriteFailureUsesTextFallback"
+  ],
+  "scope": "Shipped RemoteChannel source. Network and logging imports stubbed, dispatch boundary and storage replaced by in-process fixtures. No official sessions, endpoints, sockets or databases used."
+}

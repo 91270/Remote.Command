@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote.Command · 调用审阅</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.55 system-ui, sans-serif; }
+  body { margin: 0; }
+  section { border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 12px; padding: 16px; }
+  h2 { font-size: 16px; margin: 0 0 8px; }
+  p { margin: 8px 0; }
+  pre { background: color-mix(in srgb, currentColor 8%, transparent); border-radius: 8px; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 230px; overflow: auto; }
+  button { font: inherit; padding: 6px 16px; border: 1px solid currentColor; border-radius: 8px; margin-right: 6px; cursor: pointer; }
+  #run { background: #17655b; color: white; border-color: #17655b; }
+</style>
+<section>
+  <h2>审阅设备调用</h2>
+  <p id="summary">等待调用详情。</p>
+  <p id="message" role="status"></p>
+  <pre id="arguments" hidden></pre>
+  <button id="run" type="button" hidden>运行一次</button>
+  <button id="cancel" type="button" hidden>取消</button>
+  <pre id="result" hidden></pre>
+</section>
+<script>
+  const byId = id => document.getElementById(id);
+  const run = byId('run'), cancel = byId('cancel'), message = byId('message');
+  let hostOrigin = '*', initialized = false, canCall = false, decided = false, preview;
+  const send = data => window.parent.postMessage({ jsonrpc: '2.0', ...data }, hostOrigin);
+  const notify = (method, params) => send({ method, params });
+
+  function showPreview(value) {
+    if (decided || value?.status !== 'awaiting_user' || !/^[a-z_]+$/.test(value.tool_name) ||
+        !value.arguments || typeof value.arguments !== 'object' || Array.isArray(value.arguments)) return;
+    preview = value;
+    byId('summary').textContent = value.summary;
+    const args = byId('arguments');
+    args.textContent = value.tool_name + '\n' + JSON.stringify(value.arguments, null, 2);
+    args.hidden = false;
+    run.hidden = !canCall || value.after_client_error !== false;
+    cancel.hidden = !canCall || value.after_client_error !== false;
+    message.textContent = value.after_client_error
+      ? '宿主已拦截这次调用。' + (value.likely_reason || '')
+      : canCall ? '在当前设备权限下运行。敏感操作仍需设备端确认。' : '当前宿主可以查看这次调用。';
+  }
+
+  function finish() {
+    decided = true;
+    run.hidden = true;
+    cancel.hidden = true;
+  }
+
+  run.addEventListener('click', () => {
+    if (decided || !canCall || preview?.after_client_error !== false) return;
+    finish();
+    message.textContent = '等待宿主返回结果。';
+    send({ id: 2, method: 'tools/call', params: { name: preview.tool_name, arguments: preview.arguments } });
+  });
+  cancel.addEventListener('click', () => {
+    finish();
+    message.textContent = '已取消这次请求。';
+  });
+  window.addEventListener('message', event => {
+    if (event.source !== window.parent || event.data?.jsonrpc !== '2.0') return;
+    if (hostOrigin !== '*' && event.origin !== hostOrigin) return;
+    const data = event.data;
+    if (!initialized) {
+      if (data.id !== 1 || !data.result) return;
+      hostOrigin = event.origin && event.origin !== 'null' ? event.origin : '*';
+      canCall = !!data.result.hostCapabilities?.serverTools;
+      initialized = true;
+      notify('ui/notifications/initialized');
+    } else if (data.method === 'ui/notifications/tool-result') {
+      showPreview(data.params?.structuredContent);
+    } else if ((data.method === 'ui/resource-teardown' || data.method === 'ping') && 'id' in data) {
+      send({ id: data.id, result: {} });
+    } else if (data.id === 2 && decided) {
+      const output = byId('result');
+      output.textContent = data.error?.message || JSON.stringify(data.result, null, 2);
+      output.hidden = false;
+      message.textContent = data.error || data.result?.isError ? '调用未完成。' : '宿主已返回结果。';
+    }
+  });
+  if (window.parent !== window) {
+    send({ id: 1, method: 'ui/initialize', params: {
+      appInfo: { name: 'Remote.Command', version: '0.4.1' }, appCapabilities: {}, protocolVersion: '2026-01-26'
+    } });
+    new ResizeObserver(() => {
+      if (initialized) notify('ui/notifications/size-changed', { height: document.documentElement.scrollHeight });
+    }).observe(document.querySelector('section'));
+  }
+</script>
+</html>

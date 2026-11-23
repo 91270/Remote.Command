@@ -1,0 +1,14 @@
+node_modules
+dist/
+.env*
+!.env.example
+state/
+agent.local.json
+agent.*.local.json
+identity.json
+*.sqlite*
+diagnostics-*.zip
+backups/
+releases/
+._*
+.DS_Store

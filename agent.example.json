@@ -1,0 +1,17 @@
+{
+  "gateway": "https://mcp.example.com",
+  "workspace": "/absolute/path/to/dedicated-workspace",
+  "stateDir": "/absolute/path/to/private-agent-state",
+  "capabilities": [
+    "read",
+    "write",
+    "exec"
+  ],
+  "profiles": {
+    "node": {
+      "executable": "/absolute/path/to/node"
+    }
+  },
+  "desktopCommander": true,
+  "noSleep": true
+}
