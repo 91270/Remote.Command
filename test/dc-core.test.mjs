@@ -144,7 +144,10 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     }
     assert.match(searched + matches, /hello\.txt/);
     success(await call('stop_search', { sessionId: searchId }));
-    const command = quote(process.execPath) + ' -e "console.log(12345);setTimeout(()=>{},20000)"';
+    const fixtureScript = join(workspace, 'process-fixture.cjs');
+    await writeFile(fixtureScript, "console.log(12345); console.log('kill-ready:' + process.pid); setTimeout(() => {}, 20000);\n");
+    const nodeCommand = (process.platform === 'win32' ? '& ' : '') + quote(process.execPath);
+    const command = nodeCommand + ' ' + quote(fixtureScript);
     const started = success(await call('start_process', { command, timeout_ms: 100 }));
     const pid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(started)?.[1]);
     assert.ok(pid > 0, started);
@@ -154,11 +157,7 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     success(await call('force_terminate', { pid }));
     success(await call('list_processes'));
     assert.equal((await call('kill_process', { pid: 0 })).isError, true);
-    const killScript = join(workspace, 'kill-fixture.cjs');
-    await writeFile(killScript, "console.log('kill-ready:' + process.pid); setTimeout(() => {}, 20000);\n");
-    const killFixture = success(await call('start_process', {
-      command: quote(process.execPath) + ' ' + quote(killScript), timeout_ms: 100
-    }));
+    const killFixture = success(await call('start_process', { command, timeout_ms: 100 }));
     const fixturePid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(killFixture)?.[1]);
     assert.ok(fixturePid > 0, killFixture);
     const fixtureOutput = await untilProcessOutput(fixturePid, /kill-ready:\d+/, killFixture);
@@ -166,7 +165,7 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     assert.ok(childPid > 0, fixtureOutput);
     success(await call('kill_process', { pid: fixturePid }));
     if (process.platform === 'win32') assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
-    const repl = success(await call('start_process', { command: quote(process.execPath) + ' -i', timeout_ms: 100 }));
+    const repl = success(await call('start_process', { command: nodeCommand + ' -i', timeout_ms: 100 }));
     const replPid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(repl)?.[1]);
     assert.ok(replPid > 0, repl);
     let interaction = success(await call('interact_with_process', { pid: replPid, input: 'console.log(24680)', timeout_ms: 1000 }));
