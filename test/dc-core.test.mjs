@@ -62,6 +62,15 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     }
   }
   function success(result) { assert.equal(result.isError, undefined, output(result)); return output(result); }
+  async function untilProcessOutput(pid, expected, initial) {
+    let text = initial;
+    for (const deadline = Date.now() + 5000; !expected.test(text) && Date.now() < deadline;) {
+      await delay(100);
+      text = success(await call('read_process_output', { pid, timeout_ms: 500, offset: 0, length: 20 }));
+    }
+    assert.match(text, expected);
+    return text;
+  }
   try {
     await client.connect(transport, { timeout: 10000 });
     const listed = await client.listTools();
@@ -125,10 +134,14 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     assert.equal((await call('set_config_value', { key: 'telemetryEnabled', value: true })).isError, true);
     assert.equal((await call('set_config_value', { key: 'allowedDirectories', value: [process.platform === 'win32' ? 'C:/' : '/'] })).isError, true);
     const searched = success(await call('start_search', { path: workspace, pattern: 'changed', searchType: 'content', timeout_ms: 5000 }));
-    assert.match(searched, /hello\.txt/);
     assert.match(success(await call('list_searches')), /search_/);
     const searchId = /search_[A-Za-z0-9_]+/.exec(searched)[0];
-    success(await call('get_more_search_results', { sessionId: searchId }));
+    let matches = success(await call('get_more_search_results', { sessionId: searchId }));
+    for (const deadline = Date.now() + 5000; !/hello\.txt/.test(searched + matches) && Date.now() < deadline;) {
+      await delay(100);
+      matches = success(await call('get_more_search_results', { sessionId: searchId }));
+    }
+    assert.match(searched + matches, /hello\.txt/);
     success(await call('stop_search', { sessionId: searchId }));
     const command = quote(process.execPath) + ' -e "console.log(12345);setTimeout(()=>{},20000)"';
     const started = success(await call('start_process', { command, timeout_ms: 100 }));
@@ -136,8 +149,7 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     assert.ok(pid > 0, started);
     const session = success(await call('list_sessions'));
     assert.ok(session.includes(String(pid)));
-    const processOutput = success(await call('read_process_output', { pid, timeout_ms: 100, offset: 0, length: 20 }));
-    assert.match(started + processOutput, /12345/);
+    await untilProcessOutput(pid, /12345/, started);
     success(await call('force_terminate', { pid }));
     success(await call('list_processes'));
     assert.equal((await call('kill_process', { pid: 0 })).isError, true);
@@ -146,10 +158,7 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     }));
     const fixturePid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(killFixture)?.[1]);
     assert.ok(fixturePid > 0, killFixture);
-    let fixtureOutput = killFixture;
-    for (let attempt = 0; attempt < 10 && !/kill-ready:\d+/.test(fixtureOutput); attempt++) {
-      fixtureOutput += success(await call('read_process_output', { pid: fixturePid, timeout_ms: 500 }));
-    }
+    const fixtureOutput = await untilProcessOutput(fixturePid, /kill-ready:\d+/, killFixture);
     const childPid = Number(/kill-ready:(\d+)/.exec(fixtureOutput)?.[1]);
     assert.ok(childPid > 0, fixtureOutput);
     success(await call('kill_process', { pid: fixturePid }));
