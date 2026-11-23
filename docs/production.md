@@ -27,7 +27,7 @@ RCM_GATEWAY_IMAGE=ghcr.io/91270/remote.command:0.4.1
 docker compose up -d --no-build --pull always --wait
 ```
 
-浏览器打开自己域名下的 `/readyz` 确认服务可用，再访问 `/manage`，用 `.env` 里的 `OWNER_KEY` 登录。随后按 README 安装 Agent 并接入 ChatGPT。[快速开始](../README.md)
+浏览器打开自己域名下的 `/readyz` 确认服务可用，再访问 `/manage`，用 `.env` 里的 `OWNER_KEY` 登录。随后按 README 安装 Agent 并接入 ChatGPT。[快速开始](https://github.com/91270/Remote.Command#安装-agent)
 
 ## 从离线镜像或源码启动
 
