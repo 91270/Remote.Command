@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { LoggingMessageNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 
 const nativeTools = [
@@ -44,6 +45,11 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
   const client = new Client({ name: 'private-remote-core-test', version: '0.2.0' });
   let diagnostics = '';
   transport.stderr?.setEncoding('utf8').on('data', data => { diagnostics = (diagnostics + data).slice(-12000); });
+  client.setNotificationHandler(LoggingMessageNotificationSchema, async ({ params }) => {
+    if (typeof params.data === 'string' && params.data.startsWith('Could not end every process of PID ')) {
+      diagnostics = (diagnostics + params.data + '\n').slice(-12000);
+    }
+  });
   const invoked = new Set();
   async function call(name, args = {}, options = {}) {
     invoked.add(name);
@@ -135,10 +141,19 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     success(await call('force_terminate', { pid }));
     success(await call('list_processes'));
     assert.equal((await call('kill_process', { pid: 0 })).isError, true);
-    const killFixture = success(await call('start_process', { command: quote(process.execPath) + ' -e "setTimeout(()=>{},20000)"', timeout_ms: 100 }));
+    const killFixture = success(await call('start_process', {
+      command: quote(process.execPath) + ' -e "console.log(\'kill-ready:\'+process.pid);setTimeout(()=>{},20000)"', timeout_ms: 100
+    }));
     const fixturePid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(killFixture)?.[1]);
     assert.ok(fixturePid > 0, killFixture);
+    let fixtureOutput = killFixture;
+    for (let attempt = 0; attempt < 10 && !/kill-ready:\d+/.test(fixtureOutput); attempt++) {
+      fixtureOutput += success(await call('read_process_output', { pid: fixturePid, timeout_ms: 500 }));
+    }
+    const childPid = Number(/kill-ready:(\d+)/.exec(fixtureOutput)?.[1]);
+    assert.ok(childPid > 0, fixtureOutput);
     success(await call('kill_process', { pid: fixturePid }));
+    if (process.platform === 'win32') assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
     const repl = success(await call('start_process', { command: quote(process.execPath) + ' -i', timeout_ms: 100 }));
     const replPid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(repl)?.[1]);
     assert.ok(replPid > 0, repl);
