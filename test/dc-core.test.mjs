@@ -63,10 +63,11 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
   }
   function success(result) { assert.equal(result.isError, undefined, output(result)); return output(result); }
   async function untilProcessOutput(pid, expected, initial) {
-    let text = initial;
+    const readOutput = async () => success(await call('read_process_output', { pid, offset: -20, length: 20 }));
+    let text = initial + '\n' + await readOutput();
     for (const deadline = Date.now() + 5000; !expected.test(text) && Date.now() < deadline;) {
       await delay(100);
-      text = success(await call('read_process_output', { pid, timeout_ms: 500, offset: 0, length: 20 }));
+      text = initial + '\n' + await readOutput();
     }
     assert.match(text, expected);
     return text;
@@ -153,8 +154,10 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
     success(await call('force_terminate', { pid }));
     success(await call('list_processes'));
     assert.equal((await call('kill_process', { pid: 0 })).isError, true);
+    const killScript = join(workspace, 'kill-fixture.cjs');
+    await writeFile(killScript, "console.log('kill-ready:' + process.pid); setTimeout(() => {}, 20000);\n");
     const killFixture = success(await call('start_process', {
-      command: quote(process.execPath) + ' -e "console.log(\'kill-ready:\'+process.pid);setTimeout(()=>{},20000)"', timeout_ms: 100
+      command: quote(process.execPath) + ' ' + quote(killScript), timeout_ms: 100
     }));
     const fixturePid = Number(/(?:PID|pid)[^\d]*(\d+)/.exec(killFixture)?.[1]);
     assert.ok(fixturePid > 0, killFixture);
