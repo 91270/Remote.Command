@@ -33,8 +33,7 @@ jobs:
       - name: Test complete Agent and Gateway
         run: npm test
         env:
-          PRM_TEST_FULL: '1'
-          PRM_TEST_LAUNCH: '1'
+          RCM_TEST_LAUNCH: '1'
   compose:
     runs-on: ubuntu-latest
     steps:
@@ -46,26 +45,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y nginx
       - name: Verify the deployment image, bind mount and host Nginx HTTPS proxy
         run: |
-          export RCM_GATEWAY_IMAGE=remote-command:compose-test
-          export RCM_DATA_DIR="$RUNNER_TEMP/rcm-data"
-          docker build -t "$RCM_GATEWAY_IMAGE" .
-          npm run setup -- mcp.invalid.example
+          image=$(awk '$1 == "image:" {print $2}' compose.yaml)
+          docker build -t "$image" .
+          sudo install -d -m 0700 -o 1000 -g 1000 data
           nginx_dir=$(mktemp -d "$RUNNER_TEMP/rcm-nginx.XXXXXX")
           trap 'docker compose down' EXIT
           docker compose config -q
-          test "$(docker compose config --services | sort)" = "$(printf 'gateway\ngateway-data-init')"
-          test ! -e "$RCM_DATA_DIR"
+          test "$(docker compose config --services)" = gateway
           docker compose up -d --pull never --wait --wait-timeout 40
           test "$(docker compose port gateway 8787)" = 127.0.0.1:8787
-          test "$(sudo stat -c '%u:%g %a' "$RCM_DATA_DIR")" = '1000:1000 700'
-          sudo test -f "$RCM_DATA_DIR/gateway.sqlite"
+          test "$(docker compose exec -T gateway id -u)" = 1000
+          sudo test -f data/gateway.sqlite
+          test "$(sudo stat -c '%a' data/.oauth_client_secret)" = 600
+          test "$(sudo stat -c '%a' data/.owner_key)" = 600
+          credentials_before=$(sudo sha256sum data/.oauth_client_secret data/.owner_key)
 
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=mcp.invalid.example \
-            -addext subjectAltName=DNS:mcp.invalid.example -keyout "$nginx_dir/key.pem" -out "$nginx_dir/cert.pem"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=mcp.example.com \
+            -addext subjectAltName=DNS:mcp.example.com -keyout "$nginx_dir/key.pem" -out "$nginx_dir/cert.pem"
           sed -e 's/listen 443 ssl;/listen 127.0.0.1:18443 ssl;/' \
             -e "s|/etc/letsencrypt/live/mcp.example.com/fullchain.pem|$nginx_dir/cert.pem|" \
             -e "s|/etc/letsencrypt/live/mcp.example.com/privkey.pem|$nginx_dir/key.pem|" \
-            -e 's/mcp\.example\.com/mcp.invalid.example/' \
             deploy/nginx/remote-command.conf > "$nginx_dir/site.conf"
           cat > "$nginx_dir/nginx.conf" <<EOF
           user www-data;
@@ -78,13 +77,16 @@ jobs:
           sudo nginx -c "$nginx_dir/nginx.conf"
           trap 'sudo nginx -s quit -c "$nginx_dir/nginx.conf"; docker compose down' EXIT
 
-          origin=https://mcp.invalid.example
+          origin=https://mcp.example.com
           request() {
             curl --silent --show-error --noproxy '*' --cacert "$nginx_dir/cert.pem" \
-              --connect-to mcp.invalid.example:443:127.0.0.1:18443 "$@"
+              --connect-to mcp.example.com:443:127.0.0.1:18443 "$@"
           }
           request --fail "$origin/readyz"
           request --fail "$origin/manage" -o /dev/null
+          sudo jq -n --rawfile key data/.owner_key '{ownerKey: ($key | rtrimstr("\n"))}' \
+            | request --fail -o /dev/null -H "Origin: $origin" -H 'Content-Type: application/json' \
+              --data-binary @- "$origin/manage/api/login"
           request --fail "$origin/.well-known/oauth-protected-resource/mcp" \
             | jq -e --arg resource "$origin/mcp" '.resource == $resource'
           node -e "process.stdout.write(' '.repeat(2 * 1024 * 1024))" > "$nginx_dir/sync-body"
@@ -95,7 +97,8 @@ jobs:
           docker compose run --rm --no-deps -T -e STATE_DB=/data/restored.sqlite gateway node dist/admin.js restore < "$RUNNER_TEMP/rcm.sqlite"
           docker compose down
           docker compose up -d --pull never --wait --wait-timeout 40
-          sudo test -f "$RCM_DATA_DIR/restored.sqlite"
+          sudo test -f data/restored.sqlite
+          test "$credentials_before" = "$(sudo sha256sum data/.oauth_client_secret data/.owner_key)"
           request --fail "$origin/readyz"
   package:
     if: github.event_name == 'workflow_dispatch'

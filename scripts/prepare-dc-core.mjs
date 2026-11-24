@@ -39,7 +39,7 @@ async function walk(dir) {
 }
 await walk(destination);
 await patch('config.js', s => s.replace("const CONFIG_DIR = path.join(USER_HOME, '.claude-server-commander');",
-  "const CONFIG_DIR = process.env.PRM_CORE_STATE;\nif (!CONFIG_DIR || !path.isAbsolute(CONFIG_DIR)) throw new Error('PRM_CORE_STATE must be an absolute private directory.');"));
+  "const CONFIG_DIR = process.env.RCM_CORE_STATE;\nif (!CONFIG_DIR || !path.isAbsolute(CONFIG_DIR)) throw new Error('RCM_CORE_STATE must be an absolute private directory.');"));
 await patch('tools/filesystem.js', source => source
   .replace('return path.normalize(expandHome(p)).toLowerCase();', `const normalized = path.normalize(expandHome(p));
     return process.platform === 'win32' ? normalized.toLowerCase() : normalized;`)
@@ -48,18 +48,18 @@ await patch('tools/filesystem.js', source => source
     if (allowedDirectories.includes('/') || allowedDirectories.length === 0) {
         return true;
     }
-    let normalizedPathToCheck = normalizePath(pathToCheck);`, `    const workspace = process.env.PRM_WORKSPACE;
+    let normalizedPathToCheck = normalizePath(pathToCheck);`, `    const workspace = process.env.RCM_WORKSPACE;
     let normalizedPathToCheck = normalizePath(pathToCheck);
     if (!workspace || !isWithinAllowedDir(normalizedPathToCheck, workspace)) {
         return false;
     }
     const allowedDirectories = await getAllowedDirs();`));
-await patch('utils/toolHistory.js', s => s.replace("path.join(os.homedir(), '.claude-server-commander')", "process.env.PRM_CORE_STATE"));
+await patch('utils/toolHistory.js', s => s.replace("path.join(os.homedir(), '.claude-server-commander')", "process.env.RCM_CORE_STATE"));
 await patch('utils/fuzzySearchLogger.js', s => s.replace("path.join(os.homedir(), '.claude-server-commander-logs')",
-  "path.join(process.env.PRM_CORE_STATE, 'diagnostics')"));
+  "path.join(process.env.RCM_CORE_STATE, 'diagnostics')"));
 await patch('tools/improved-process-tools.js', s => s.replace("const mcpRoot = path.resolve(__dirname, '..', '..');",
-  "const mcpRoot = process.cwd(); // Private Remote MCP: temporary execution belongs to the selected workspace."));
-await writeFile(join(destination, 'utils/capture.js'), `// Private Remote MCP adapter: telemetry is disabled and no endpoint is contacted.
+  "const mcpRoot = process.cwd(); // Remote.Command: temporary execution belongs to the selected workspace."));
+await writeFile(join(destination, 'utils/capture.js'), `// Remote.Command adapter: telemetry is disabled and no endpoint is contacted.
 export const capture = async () => {};
 export const captureBase = capture;
 export const capture_call_tool = capture;
@@ -74,7 +74,7 @@ export const runWithToolCallPaths = fn => fn();
 export const isInsideUiOriginCall = () => false;
 export const addToolCallPaths = () => {};
 `);
-await writeFile(join(destination, 'utils/feature-flags.js'), `// Private Remote MCP: deterministic local flags. No cache or network refresh.
+await writeFile(join(destination, 'utils/feature-flags.js'), `// Remote.Command: deterministic local flags. No cache or network refresh.
 export const featureFlagManager = {
   initialize: async () => {},
   get: (_name, fallback = false) => fallback,
@@ -85,7 +85,7 @@ export const featureFlagManager = {
   dispose: () => {}
 };
 `);
-await writeFile(join(destination, 'utils/mcp-ui-ab-test.js'), `// Private Remote MCP: always expose the supported MCP App resources.
+await writeFile(join(destination, 'utils/mcp-ui-ab-test.js'), `// Remote.Command: always expose the supported MCP App resources.
 export const MCP_UI_EXPERIMENT_NAME = 'McpUiPreviews';
 export const MCP_UI_SHOW_VARIANT = 'showMCPUi';
 export const MCP_UI_HIDE_VARIANT = 'notShowMCPUi';
@@ -103,7 +103,7 @@ await writeFile(join(destination, 'tools/feedback.js'), `import { appendFile } f
 import { join } from 'node:path';
 // The original feedback tool is retained as a local feedback event.
 export async function giveFeedbackToDesktopCommander(params = {}) {
-  await appendFile(join(process.env.PRM_CORE_STATE, 'feedback.jsonl'),
+  await appendFile(join(process.env.RCM_CORE_STATE, 'feedback.jsonl'),
     JSON.stringify({ at: new Date().toISOString(), ...params }) + '\\n', { mode: 0o600 });
   return { content: [{ type: 'text', text: 'Feedback recorded in the private Agent state directory.' }] };
 }
@@ -111,7 +111,7 @@ export async function giveFeedbackToDesktopCommander(params = {}) {
 await writeFile(join(destination, 'utils/ripgrep-resolver.js'), `import { isAbsolute } from 'node:path';
 import { access } from 'node:fs/promises';
 export async function getRipgrepPath() {
-  const file = process.env.PRM_RIPGREP;
+  const file = process.env.RCM_RIPGREP;
   if (!file || !isAbsolute(file)) throw new Error('Configure the absolute path of a trusted ripgrep executable on the Agent.');
   await access(file);
   return file;
@@ -123,7 +123,7 @@ await patch('tools/pdf/markdown.js', s => {
   const last = s.indexOf('\n/**', first);
   if (first < 0 || last < 0) throw new Error('Chrome resolver location changed.');
   return s.slice(0, first) + `async function getChromePath() {
-    const executable = process.env.PRM_CHROME_PATH;
+    const executable = process.env.RCM_CHROME_PATH;
     if (!executable || !isAbsolute(executable) || !existsSync(executable)) return undefined;
     return executable;
 }
@@ -140,7 +140,7 @@ resources. scripts/prepare-dc-core.mjs records reproducible local modifications.
 The remote-device runtime, official authentication and npm installation scripts
 are excluded. Telemetry, remote feature flags, browser onboarding and promotional
 messages use local adapters. Configuration, history and diagnostics are stored
-under PRM_CORE_STATE. Chrome and ripgrep resolve only to locally configured
+under RCM_CORE_STATE. Chrome and ripgrep resolve only to locally configured
 executables. node:local temporary scripts run in the selected workspace.
 
 The original tool schemas use the zod3 dependency alias. The independent

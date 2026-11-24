@@ -5,7 +5,7 @@ class FuzzySearchLogger {
     constructor() {
         this.initialized = false;
         // Create log file in a dedicated directory
-        const logDir = path.join(process.env.PRM_CORE_STATE, 'diagnostics');
+        const logDir = path.join(process.env.RCM_CORE_STATE, 'diagnostics');
         this.logPath = path.join(logDir, 'fuzzy-search.log');
     }
     async ensureLogFile() {

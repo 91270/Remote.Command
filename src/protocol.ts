@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 
@@ -6,32 +7,20 @@ export const secret = () => randomBytes(32).toString('base64url');
 export const hash = (s: string) => createHash('sha256').update(s).digest('base64url');
 export const match = (a: string, b: string) => timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
 export const uuid = z.uuid();
-const file = z.string().min(1).max(512).describe('Workspace relative path; use / as separator.');
-const profile = z.string().regex(/^[a-zA-Z0-9_-]{1,48}$/);
+export const agentClientId = 'remote-command-agent';
+export const { version: projectVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
 export const operations = {
   disconnect: z.strictObject({}),
   dc_call: z.strictObject({ tool: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/), arguments: z.record(z.string(), z.unknown()) }),
-  dc_resource: z.strictObject({ uri: z.string().min(1).max(1024) }),
-  list_directory: z.strictObject({ path: file }),
-  read_file: z.strictObject({ path: file, offset: z.number().int().min(0).max(1000000).optional(), length: z.number().int().min(1).max(400).optional() }),
-  get_file_info: z.strictObject({ path: file }),
-  search: z.strictObject({ path: file, pattern: z.string().min(1).max(200), searchType: z.enum(['files', 'content']) }),
-  write_file: z.strictObject({ path: file, content: z.string().max(65536) }),
-  create_directory: z.strictObject({ path: file }),
-  move_file: z.strictObject({ source: file, destination: file }),
-  edit_block: z.strictObject({ file_path: file, old_string: z.string().min(1).max(16384), new_string: z.string().max(16384) }),
-  start_command: z.strictObject({ profile, args: z.array(z.string().max(4096).refine(s => !s.includes('\0'))).max(32), cwd: file, timeoutSeconds: z.number().int().min(1).max(86400).optional() })
+  dc_resource: z.strictObject({ uri: z.string().min(1).max(1024) })
 };
 export const names = Object.keys(operations) as Op[];
 export type Op = keyof typeof operations;
-export const isOp = (k: string): k is Op => Object.hasOwn(operations, k);
 export const capabilities = ['read', 'write', 'exec'] as const;
 export type Capability = typeof capabilities[number];
 export function capability(op: Op, args: Record<string, unknown> = {}): Capability {
   if (op === 'dc_call') return dcCapability(String(args.tool), (args.arguments ?? {}) as Record<string, unknown>);
-  if (op === 'dc_resource') return 'read';
-  if (op === 'start_command' || op === 'disconnect') return 'exec';
-  return ['write_file', 'create_directory', 'move_file', 'edit_block'].includes(op) ? 'write' : 'read';
+  return op === 'dc_resource' ? 'read' : 'exec';
 }
 export function dcCapability(tool: string, args: Record<string, unknown> = {}): Capability {
   if (['start_process', 'interact_with_process', 'force_terminate', 'kill_process', 'give_feedback_to_desktop_commander'].includes(tool) ||

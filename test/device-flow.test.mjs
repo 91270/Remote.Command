@@ -8,7 +8,7 @@ import { Store } from '../dist/store.js';
 import { hash, secret } from '../dist/protocol.js';
 
 test('browser device pairing binds PKCE and a one-time owner decision to the device credential', async () => {
-  const folder = await mkdtemp(join(tmpdir(), 'prm-device-flow-'));
+  const folder = await mkdtemp(join(tmpdir(), 'rcm-device-flow-'));
   const store = new Store(join(folder, 'gateway.sqlite'));
   const flow = new DeviceFlow(store, 'https://private.example.com');
   const proof = secret(), credential = secret();

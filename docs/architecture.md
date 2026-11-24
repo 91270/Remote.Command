@@ -14,7 +14,6 @@ flowchart LR
     Nginx -->|127.0.0.1:8787| Gateway["Gateway 容器"]
     Gateway --> Storage["SQLite (任务 / 设备 / 审计)"]
     Agent -->|stdio| Core["Desktop Commander 0.3.3 核心"]
-    Agent -->|stdio| Compat["兼容核心 (remote_*)"]
     Operator["本机终端审批"] --> Agent
 ```
 
@@ -22,7 +21,7 @@ flowchart LR
 
 - **上游基线**：[@wonderwhy-er/desktop-commander@0.3.3](https://www.npmjs.com/package/@wonderwhy-er/desktop-commander/v/0.3.3)（Git 修订 `bce370e9395f5bc74eda34913e5ae1dee48df8f8`）。
 - **核心适配**：自建 Agent 通过 `src/dc-core.ts` 启动完整 MIT 本地核心，使用本地运行时适配器替代了官方遥测、发布开关、远程反馈上报和欢迎页；配置与历史写入设备自己的私有状态目录。
-- **原生与兼容并存**：默认导出 `tools/list` 中的 25 个原生工具与 2 个 MCP App 资源，完整保留文本、图片、`structuredContent` 与 `_meta`；同时保留 `vendor/desktop-commander` 提供的第一版 `remote_*` 兼容工具。
+- **工具与资源**：导出 25 个 Desktop Commander 工具与 2 个核心 MCP App 资源，保留文本、图片、`structuredContent` 与 `_meta`。
 - **许可与可追溯性**：[MIT 许可证](../vendor/desktop-commander-full/LICENSE) · [本地修改说明](../vendor/desktop-commander-full/NOTICE.md) · [文件来源与哈希清单](../vendor/desktop-commander-full/manifest.json) · [再生成脚本](../scripts/prepare-dc-core.mjs)
 
 ---

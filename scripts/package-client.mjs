@@ -8,9 +8,9 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const releaseDir = process.argv[2] ? resolve(process.argv[2]) : join(root, 'releases');
 const source = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
-const stage = await mkdtemp(join(tmpdir(), 'prm-package-'));
-const runtime = ['agent', 'agent-config', 'agent-service', 'client-commands', 'client-events', 'command',
-  'dc-core', 'local-mcp', 'protocol', 'remote-cli', 'vendor', 'workspace'];
+const stage = await mkdtemp(join(tmpdir(), 'rcm-package-'));
+const runtime = ['agent', 'agent-config', 'agent-service', 'client-commands', 'client-events',
+  'dc-core', 'protocol', 'remote-cli', 'workspace'];
 const json = value => JSON.stringify(value, null, 2) + '\n';
 
 try {

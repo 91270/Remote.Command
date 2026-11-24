@@ -18,7 +18,7 @@ export class OAuth {
   constructor(private readonly store: Store, private readonly cfg: OAuthConfig) {
     this.resource = cfg.origin + '/mcp';
     if (!opaque.test(cfg.ownerKey) || !opaque.test(cfg.clientSecret) || match(cfg.ownerKey, cfg.clientSecret) ||
-        !/^[A-Za-z0-9_-]{8,128}$/.test(cfg.clientId) || !cfg.redirects.size) throw new Error('Invalid OAuth configuration. Run setup to generate distinct secrets.');
+        !/^[A-Za-z0-9_-]{8,128}$/.test(cfg.clientId) || !cfg.redirects.size) throw new Error('Invalid OAuth configuration. Check the client ID, redirect URIs and distinct 43-character credentials.');
     for (const raw of cfg.redirects) {
       const url = new URL(raw);
       if (url.hash || url.username || url.password ||

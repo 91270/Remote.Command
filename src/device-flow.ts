@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { readJson, json, bearer } from './http.js';
-import { hash, match, secret, uuid, type Capability } from './protocol.js';
+import { agentClientId, hash, match, secret, uuid, type Capability } from './protocol.js';
 import type { Store } from './store.js';
 
 const opaque = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -85,13 +85,13 @@ export class DeviceFlow {
   async route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
     if (req.method !== 'POST') return false;
     if (url.pathname === '/device/start') {
-      const args = z.strictObject({ client_id: z.literal('private-remote-agent'), device_name: z.string().min(1).max(80).refine(name => !/[\u0000-\u001f\u007f]/.test(name)),
+      const args = z.strictObject({ client_id: z.literal(agentClientId), device_name: z.string().min(1).max(80).refine(name => !/[\u0000-\u001f\u007f]/.test(name)),
         code_challenge: opaque, code_challenge_method: z.literal('S256') }).parse(await readJson(req, 8192));
       json(res, 200, this.start(args.device_name, args.code_challenge));
       return true;
     }
     if (url.pathname === '/device/poll') {
-      const args = z.strictObject({ client_id: z.literal('private-remote-agent'), device_code: opaque, code_verifier: verifier,
+      const args = z.strictObject({ client_id: z.literal(agentClientId), device_code: opaque, code_verifier: verifier,
         credential: opaque }).parse(await readJson(req, 8192));
       const result = this.poll(args.device_code, args.code_verifier, args.credential);
       json(res, 'error' in result ? 400 : 200, result);

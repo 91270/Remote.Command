@@ -24,7 +24,7 @@ type DeviceVerification = {
 export class Dashboard {
   private readonly cookieName: string;
   constructor(private readonly store: Store, private readonly config: DashboardConfig, private readonly deviceFlow?: DeviceVerification) {
-    this.cookieName = config.origin.startsWith('https:') ? '__Host-prm_dashboard' : 'prm_dashboard';
+    this.cookieName = config.origin.startsWith('https:') ? '__Host-rcm_dashboard' : 'rcm_dashboard';
   }
 
   private cookie(token: string, seconds: number) {

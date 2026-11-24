@@ -1,4 +1,4 @@
-// Private Remote MCP adapter: telemetry is disabled and no endpoint is contacted.
+// Remote.Command adapter: telemetry is disabled and no endpoint is contacted.
 export const capture = async () => {};
 export const captureBase = capture;
 export const capture_call_tool = capture;

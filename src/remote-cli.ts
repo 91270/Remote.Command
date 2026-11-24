@@ -16,9 +16,7 @@ const help = `Usage: remote-command remote [options]
 
   --logout              Revoke this device and remove saved credentials.
   --report              Save a local diagnostics ZIP and exit.
-  --no-upload           Save diagnostics locally (the default for this deployment).
   --no-persist-session  Pair for this run without saving credentials.
-  --persist-session     Keep the device paired across launches (default).
   --disable-no-sleep    Disable macOS keep-awake mode.
   --debug               Print executor recovery details.
   --no-browser          Print the pairing URL without opening a browser.
@@ -31,9 +29,7 @@ const options = {
   help: { type: 'boolean', short: 'h' },
   logout: { type: 'boolean' },
   report: { type: 'boolean' },
-  'no-upload': { type: 'boolean' },
   'no-persist-session': { type: 'boolean' },
-  'persist-session': { type: 'boolean' },
   'disable-no-sleep': { type: 'boolean' },
   debug: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
@@ -89,21 +85,10 @@ async function main() {
   if (values.help) { console.log(help); return; }
 
   const maintenance = values.logout ? 'logout' : values.report ? 'report' : 'connect';
-  const explicit = values.config ?? process.env.RCM_AGENT_CONFIG ?? process.env.PRM_AGENT_CONFIG;
-  const home = homedir();
-  const defaultFile = join(home, '.remote-command', 'agent.json');
-  let file = explicit ? resolve(explicit) : defaultFile;
-  let configured = await exists(file);
-  if (!explicit && !configured) {
-    for (const fallback of [join(home, '.remote-command-mcp', 'agent.json'), join(home, '.private-remote-mcp', 'agent.json'), resolve('agent.local.json')]) {
-      if (await exists(fallback)) {
-        file = fallback;
-        configured = true;
-        break;
-      }
-    }
-  }
-  if (!configured) {
+  const explicit = values.config ?? process.env.RCM_AGENT_CONFIG;
+  const defaultFile = join(homedir(), '.remote-command', 'agent.json');
+  const file = explicit ? resolve(explicit) : defaultFile;
+  if (!await exists(file)) {
     if (explicit && maintenance !== 'connect') throw new Error('Agent configuration not found: ' + file);
     if (maintenance === 'logout') { console.log('This Agent has no saved identity.'); return; }
     if (maintenance === 'report') { await deviceReport(); return; }

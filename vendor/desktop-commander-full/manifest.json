@@ -44,7 +44,7 @@
     {
       "path": "config.js",
       "upstreamSha256": "899d83f255d256066f559e80b7fc3247eb9d6c43efdd49000688544ae9d962f1",
-      "vendoredSha256": "bbbc58fa751a0e8e984b81d2b5fd2f8026badf97b42d54d9ec0c5efedd6fddcc",
+      "vendoredSha256": "f949d9d564381a8183ad51a263a0e32f7ccec3741174825aebb92726d40e709e",
       "modified": true
     },
     {
@@ -212,7 +212,7 @@
     {
       "path": "tools/feedback.js",
       "upstreamSha256": "daf0968e0466291bdfd82d3b75164b3af0706936aeb41119f45779d3f4d56718",
-      "vendoredSha256": "df7e636ed3ac3dc37e139e336e88b72042a237dafb725f4346eb56e6bb14f963",
+      "vendoredSha256": "4105c3df9749ca606a19ca345dc28136135edf33175096d41b52b574ed8648ec",
       "modified": true
     },
     {
@@ -224,7 +224,7 @@
     {
       "path": "tools/filesystem.js",
       "upstreamSha256": "787d9f63525abf96d24b9a4696ac111c964510bc0899123d0afc9c5ab259dd69",
-      "vendoredSha256": "c328437d1e3d846cb5df25cd687afde0ff840e87ee6372fddcf003406b971852",
+      "vendoredSha256": "a9ca9380b15f2a8df1d934e887febc86216cb6bfacab7093de0a95cab4232fbe",
       "modified": true
     },
     {
@@ -260,7 +260,7 @@
     {
       "path": "tools/improved-process-tools.js",
       "upstreamSha256": "e0be1ddbec830a209d00cff6bee3d737eae9656cfafbc8aeeccbff97290c6602",
-      "vendoredSha256": "d338b27455eb158a5d4a6f1e7d04d215263d9250d15e822795911a6b9cb9dd70",
+      "vendoredSha256": "5043ef6275a801a580b5fe45694b303756f4e0ffd0615eb68b51375d07b88d19",
       "modified": true
     },
     {
@@ -332,7 +332,7 @@
     {
       "path": "tools/pdf/markdown.js",
       "upstreamSha256": "ece461975a0bb20a80e187431ca6a53281a691206f87711fc6a4700d76c3206b",
-      "vendoredSha256": "9add826f71236980176388d93cdf84ceb2a9fed3a03972535e63a244d149450f",
+      "vendoredSha256": "40b36d5986c6e9c739f66ea283352b595a4c07a95e365424881e360874506a37",
       "modified": true
     },
     {
@@ -974,7 +974,7 @@
     {
       "path": "utils/capture.js",
       "upstreamSha256": "1d998b2be393fc6c153b72b4616035d820a272660f863567297b6c657bc923da",
-      "vendoredSha256": "ce4e061823373e878c00465d27dab23f0710e9a89ae4bf3734bdb4a3b619de52",
+      "vendoredSha256": "9c11a8847d07105763760765632f33671722284ac1f8083b18b03246043b4ecd",
       "modified": true
     },
     {
@@ -1046,7 +1046,7 @@
     {
       "path": "utils/feature-flags.js",
       "upstreamSha256": "c5a16ef0fbca25588b02b02f2094ddc621e72beee772928a255dc8ee51b572d9",
-      "vendoredSha256": "ce546d7a95bd0f1f7f008d9d2f2fababf2a0eee9c49beb46518b35a7a6def775",
+      "vendoredSha256": "a0e0fac08252d2a3425745f04b6b5be6a37fb59d40bf4153f3dc91907b3c9282",
       "modified": true
     },
     {
@@ -1166,7 +1166,7 @@
     {
       "path": "utils/fuzzySearchLogger.js",
       "upstreamSha256": "01cca1e415e91da50f24d36c454e3cca8a0170f71940725528f6569b9cdfc9f8",
-      "vendoredSha256": "9b206e7324609efb1703a240ebfabe9acae014960bde7631a3b3a9e161933e1f",
+      "vendoredSha256": "3c652f46411873c78f6857fab8a9976e27fa367473d0fe9cd358ba07d7230ebc",
       "modified": true
     },
     {
@@ -1238,7 +1238,7 @@
     {
       "path": "utils/mcp-ui-ab-test.js",
       "upstreamSha256": "978c72e71812e555f6e90cf107d936be5777f60f2e2658109af92513a2a06a42",
-      "vendoredSha256": "5be384abd11e51c3680887f172d7cc185df2ba542a08ab2d0ac31727be9728c0",
+      "vendoredSha256": "b7bb774c5c4b1a9501134db3ac8957811d1d235ad32a8942b4a4f8b1ae9c6036",
       "modified": true
     },
     {
@@ -1334,7 +1334,7 @@
     {
       "path": "utils/ripgrep-resolver.js",
       "upstreamSha256": "55632d49b2002108675503056f92a070becf979fc8ec06b2c90ca54e102fc804",
-      "vendoredSha256": "a2fcf321ba7c943b112e822ee72e94db428e17b83d8b882d48ebd1da49f565ca",
+      "vendoredSha256": "8f98d4c8df3c0e6bf6dc93f48c997652dbae4802c223262799ffdea1e10843ae",
       "modified": true
     },
     {
@@ -1406,7 +1406,7 @@
     {
       "path": "utils/toolHistory.js",
       "upstreamSha256": "9ba40b29b628af7fa4e336d9c88a00880948c4bf532af272c74b1fef5311f641",
-      "vendoredSha256": "1d82bb7b77063b58ab18f972ad206808db244a48ed3f797832cf32b4f5e727b8",
+      "vendoredSha256": "6acd12daa1ac6312e27cf460f1c0e8d8a3020ae1b6975f2c0d393bad87c8d3a6",
       "modified": true
     },
     {

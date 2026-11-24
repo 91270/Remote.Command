@@ -5,10 +5,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist/store.js';
-import { endpoint, secret } from '../dist/protocol.js';
+import { endpoint, secret, syncReply } from '../dist/protocol.js';
 
 test('store: invites, capability checks, lost responses, replacement, terminal acknowledgement and revocation', () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'prm-store-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'rcm-store-'));
   const db = new Store(join(tmp, 'state.sqlite'));
   try {
     const invite = db.invite('test', ['read']);
@@ -18,13 +18,13 @@ test('store: invites, capability checks, lost responses, replacement, terminal a
     const expired = db.invite('unused', ['read']);
     db.db.exec('UPDATE invites SET expires=0');
     assert.equal(db.pair(expired, secret()), undefined);
-    assert.throws(() => db.submit(agent.id, 'read_file', { path: 'file' }), /offline/);
+    assert.throws(() => db.submit(agent.id, 'dc_call', { tool: 'read_file', arguments: { path: 'file' } }), /offline/);
     const boot = randomUUID();
     db.sync(agent.id, boot, 'darwin', []);
-    assert.throws(() => db.submit(agent.id, 'write_file', {}), /not paired/);
-    const a = db.submit(agent.id, 'read_file', { path: 'file' });
-    const b = db.submit(agent.id, 'read_file', { path: 'other' });
-    const c = db.submit(agent.id, 'read_file', { path: 'never' });
+    assert.throws(() => db.submit(agent.id, 'dc_call', { tool: 'write_file', arguments: {} }), /not paired/);
+    const a = db.submit(agent.id, 'dc_call', { tool: 'read_file', arguments: { path: 'file' } });
+    const b = db.submit(agent.id, 'dc_call', { tool: 'read_file', arguments: { path: 'other' } });
+    const c = db.submit(agent.id, 'dc_call', { tool: 'read_file', arguments: { path: 'never' } });
     assert.equal(db.cancel(c.id).status, 'cancelled');
     let reply = db.sync(agent.id, boot, 'darwin', []);
     assert.deepEqual(new Set(reply.jobs.map(j => j.id)), new Set([a.id, b.id]));
@@ -60,7 +60,7 @@ test('endpoint: HTTPS and explicit IPv4 loopback only', () => {
 });
 
 test('task history upgrade preserves existing devices and results', () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'prm-history-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'rcm-history-'));
   const file = join(tmp, 'state.sqlite');
   let store = new Store(file);
   try {
@@ -68,7 +68,7 @@ test('task history upgrade preserves existing devices and results', () => {
     const { id: device } = store.pair(store.invite('fixture', ['read']), credential);
     store.sync(device, randomUUID(), 'linux', []);
     const lastSeen = store.devices()[0].lastSeen;
-    const task = store.submit(device, 'read_file', { path: 'hello.txt' });
+    const task = store.submit(device, 'dc_call', { tool: 'read_file', arguments: { path: 'hello.txt' } });
     store.finish(task.id, 'succeeded', 'retained output');
     store.db.exec('ALTER TABLE tasks DROP COLUMN tool_name; ALTER TABLE tasks DROP COLUMN background; ALTER TABLE devices DROP COLUMN last_seen');
     store.db.close();
@@ -82,7 +82,7 @@ test('task history upgrade preserves existing devices and results', () => {
 });
 
 test('unready executors hold queued tasks and an old boot cannot mark its replacement offline', async () => {
-  const folder = mkdtempSync(join(tmpdir(), 'prm-readiness-'));
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-readiness-'));
   const store = new Store(join(folder, 'gateway.sqlite'));
   try {
     const credential = secret();
@@ -94,7 +94,7 @@ test('unready executors hold queued tasks and an old boot cannot mark its replac
     store.markOffline(device, oldBoot);
     assert.equal(store.devices()[0].online, true);
 
-    const job = store.submit(device, 'read_file', { path: 'hello.txt' });
+    const job = store.submit(device, 'dc_call', { tool: 'read_file', arguments: { path: 'hello.txt' } });
     assert.deepEqual(store.sync(device, boot, 'darwin', [], undefined, false).jobs, []);
     assert.equal(store.devices()[0].online, false);
     assert.ok(store.devices()[0].lastSeen);
@@ -105,5 +105,29 @@ test('unready executors hold queued tasks and an old boot cannot mark its replac
     assert.equal(store.devices()[0].online, false);
     assert.equal(store.devices()[0].lastSeen, lastSeen);
     assert.equal(store.task(job.id).status, 'interrupted');
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('unsupported stored tasks never block current Agent work or erase completed results', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-unsupported-task-'));
+  const store = new Store(join(folder, 'gateway.sqlite'));
+  try {
+    const device = store.pair(store.invite('fixture', ['read']), secret()).id;
+    const boot = randomUUID();
+    store.sync(device, boot, 'linux', []);
+    const args = { tool: 'read_file', arguments: { path: 'hello.txt' } };
+    const queued = store.submit(device, 'dc_call', args);
+    const dispatched = store.submit(device, 'dc_call', args);
+    const completed = store.submit(device, 'dc_call', args);
+    const current = store.submit(device, 'dc_call', args);
+    store.finish(completed.id, 'succeeded', 'retained');
+    store.db.prepare('UPDATE tasks SET op=? WHERE id IN (?,?,?)').run('unknown_operation', queued.id, dispatched.id, completed.id);
+    store.db.prepare("UPDATE tasks SET status='dispatched',boot=? WHERE id=?").run(boot, dispatched.id);
+
+    const reply = syncReply.parse(store.sync(device, boot, 'linux', []));
+    assert.deepEqual(reply.jobs.map(job => job.id), [current.id]);
+    assert.equal(store.task(queued.id).status, 'interrupted');
+    assert.equal(store.task(dispatched.id).status, 'interrupted');
+    assert.equal(store.task(completed.id).output, 'retained');
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

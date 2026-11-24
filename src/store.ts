@@ -2,11 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
+const dispatchMs = 16 * 60_000;
 const liveSql = "('dispatched','awaiting_approval','running')";
+const outstandingSql = "('queued','dispatched','awaiting_approval','running')";
 const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interrupted')";
+const operationPlaceholders = names.map(() => '?').join(',');
 type Device = { id: string; name: string; credential: string; caps: string; boot: string | null; seen: number | null; platform: string | null; revoked: number };
 type Task = { id: string; device: string; op: Op; args: string; status: string; boot: string | null; created: number; changed: number; deadline: number; cancel: number; output: string | null; seq: number; mcp_result: string | null; tool_name: string | null };
 
@@ -92,7 +95,7 @@ export class Store {
     });
   }
   private interruptRevokedDeviceTasks(device: string) {
-    for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ('queued','dispatched','awaiting_approval','running')`).all(device))
+    for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${outstandingSql}`).all(device))
       this.finish(String(t.id), 'interrupted', 'Device revoked. Work already started on the device may require local cleanup.');
   }
   revokeAllDevices() {
@@ -144,11 +147,6 @@ export class Store {
       return this.view(this.task(id)!);
     });
   }
-  tasks(device: string, activeOnly: boolean) {
-    const predicate = activeOnly ? ` AND status NOT IN ${doneSql}` : '';
-    return (this.db.prepare(`SELECT * FROM tasks WHERE device=?${predicate} ORDER BY created DESC LIMIT 40`).all(device) as Task[])
-      .map(t => ({ ...this.view(t), output: undefined, result: undefined }));
-  }
   markBackground(id: string) {
     this.db.prepare('UPDATE tasks SET background=1 WHERE id=?').run(id);
   }
@@ -192,6 +190,8 @@ export class Store {
     return this.tx(() => {
       const dev = this.db.prepare('SELECT * FROM devices WHERE id=? AND revoked=0').get(device) as Device | undefined;
       if (!dev || this.db.prepare('SELECT 1 FROM retired_boots WHERE device=? AND boot=?').get(device, boot)) return;
+      for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${outstandingSql} AND op NOT IN (${operationPlaceholders})`).all(device, ...names))
+        this.finish(String(t.id), 'interrupted', 'This operation is unavailable on the current Agent.');
       if (dev.boot && dev.boot !== boot) {
         this.db.prepare('INSERT INTO retired_boots VALUES(?,?)').run(device, dev.boot);
         for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${liveSql}`).all(device))
@@ -220,8 +220,7 @@ export class Store {
       const pending = this.db.prepare("SELECT * FROM tasks WHERE device=? AND status='queued' AND deadline>? ORDER BY created LIMIT ?")
         .all(device, now, Math.max(0, maxActive - active.length)) as Task[];
       for (const t of pending) {
-        const seconds = t.op === 'start_command' ? (JSON.parse(t.args).timeoutSeconds ?? 600) : 60;
-        this.db.prepare("UPDATE tasks SET status='dispatched',boot=?,changed=?,deadline=? WHERE id=?").run(boot, now, now + (seconds + 900) * 1000, t.id);
+        this.db.prepare("UPDATE tasks SET status='dispatched',boot=?,changed=?,deadline=? WHERE id=?").run(boot, now, now + dispatchMs, t.id);
         this.audit('task_dispatched', { id: t.id, device });
       }
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));

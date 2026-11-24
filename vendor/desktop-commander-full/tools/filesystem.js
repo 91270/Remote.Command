@@ -262,7 +262,7 @@ function isWithinAllowedDir(normalizedPathToCheck, allowedDir) {
  * @returns boolean True if path is allowed
  */
 async function isPathAllowed(pathToCheck) {
-    const workspace = process.env.PRM_WORKSPACE;
+    const workspace = process.env.RCM_WORKSPACE;
     let normalizedPathToCheck = normalizePath(pathToCheck);
     if (!workspace || !isWithinAllowedDir(normalizedPathToCheck, workspace)) {
         return false;

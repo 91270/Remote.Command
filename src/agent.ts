@@ -10,14 +10,13 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, type AgentConfig } from './agent-config.js';
-import { approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, operations, secret, syncReply, terminal, uuid, work, type Update, type Work, type Catalog } from './protocol.js';
-import { programEnv, workspacePath } from './workspace.js';
-import { runCommand } from './command.js';
+import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, operations, projectVersion, secret, syncReply, terminal, uuid, work, type Update, type Work, type Catalog } from './protocol.js';
+import { programEnv } from './workspace.js';
 import { clientEvents } from './client-events.js';
 import { deviceLogin, deviceLogout, deviceReport, deviceStatus, agentLock, keepAwake, identity, identityFile, requireUnpaired, saveIdentity, withIdentityLock, revokeIdentity, type DeviceIdentity } from './client-commands.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
-const proposal = z.strictObject({ job: work, expires: z.number().int(), nonce: uuid, command: z.object({ executable: z.string(), args: z.array(z.string()), cwd: z.string() }).optional() });
+const proposal = z.strictObject({ job: work, expires: z.number().int(), nonce: uuid });
 const filename = (cfg: AgentConfig, id: string, extension: 'pending' | 'decision') => join(cfg.approvals, `${uuid.parse(id)}.${extension}.json`);
 const fetchJson = (cfg: AgentConfig, path: string, payload: object, credential?: string) => fetch(cfg.origin + path, {
   method: 'POST', redirect: 'error', signal: AbortSignal.timeout(7000),
@@ -77,8 +76,6 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
   let executorRecovery: Promise<void> | undefined;
   type Active = { state: Update; abort: AbortController; finished?: Promise<void> };
   const jobs = new Map<string, Active>();
-  let client: Client | undefined;
-  let connecting: Promise<Client> | undefined;
   let dcClient: Client | undefined;
   let dcConnecting: Promise<Client> | undefined;
   let dcCatalog: Catalog | undefined;
@@ -86,13 +83,13 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
   const desktopCore = () => {
     if (dcClient) return Promise.resolve(dcClient);
     dcConnecting ??= (async () => {
-      const c = new Client({ name: 'private-remote-desktop-core', version: '0.2.0' });
+      const c = new Client({ name: agentClientId, version: projectVersion });
       c.onclose = () => {
         if (dcClient !== c) return;
         dcClient = undefined;
         dcCatalog = undefined;
         catalogSynced = false;
-        if (!shutdown.signal.aborted) events.record({ event: 'core_disconnected', executor: 'desktop-commander' });
+        if (!shutdown.signal.aborted) events.record({ event: 'core_disconnected' });
       };
       const coreState = join(cfg.stateDir, 'core');
       const transport = new StdioClientTransport({
@@ -101,9 +98,9 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         cwd: cfg.workspace,
         env: {
           ...programEnv() as Record<string, string>,
-          PRM_CORE_STATE: coreState, PRM_WORKSPACE: cfg.workspace,
-          ...(cfg.ripgrep ? { PRM_RIPGREP: cfg.ripgrep } : {}),
-          ...(cfg.chromePath ? { PRM_CHROME_PATH: cfg.chromePath } : {})
+          RCM_CORE_STATE: coreState, RCM_WORKSPACE: cfg.workspace,
+          ...(cfg.ripgrep ? { RCM_RIPGREP: cfg.ripgrep } : {}),
+          ...(cfg.chromePath ? { RCM_CHROME_PATH: cfg.chromePath } : {})
         },
         stderr: 'ignore'
       });
@@ -114,46 +111,21 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         dcCatalog = catalog.parse({ tools: tools.tools, resources: resources.resources });
         dcClient = c;
         catalogSynced = false;
-        events.record({ event: 'core_ready', executor: 'desktop-commander', pid: transport.pid ?? undefined });
+        events.record({ event: 'core_ready', pid: transport.pid ?? undefined });
         return c;
       } catch (e) { await transport.close(); throw e; }
     })().finally(() => { dcConnecting = undefined; });
     return dcConnecting;
   };
-  const localCore = () => {
-    if (client) return Promise.resolve(client);
-    connecting ??= (async () => {
-      const c = new Client({ name: 'private-remote-agent', version: '0.1.0' });
-      c.onclose = () => {
-        if (client !== c) return;
-        client = undefined;
-        if (!shutdown.signal.aborted) events.record({ event: 'core_disconnected', executor: 'basic' });
-      };
-      const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('local-mcp.js', import.meta.url))],
-        cwd: cfg.workspace, env: { ...programEnv() as Record<string, string>, ...(cfg.ripgrep ? { PRM_RIPGREP: cfg.ripgrep } : {}) }, stderr: 'ignore' });
-      try {
-        await c.connect(transport, { timeout: 5000 });
-        await c.listTools({}, { timeout: 5000, signal: shutdown.signal });
-        client = c;
-        events.record({ event: 'core_ready', executor: 'basic', pid: transport.pid ?? undefined });
-        return c;
-      }
-      catch (e) { await transport.close(); throw e; }
-    })().finally(() => { connecting = undefined; });
-    return connecting;
-  };
-  function recoverExecutors() {
+  function recoverExecutor() {
     if (executorRecovery || Date.now() < retryExecutorAt || shutdown.signal.aborted) return;
-    const pending = [localCore(), ...(cfg.desktopCommander ? [desktopCore()] : [])];
-    executorRecovery = Promise.allSettled(pending).then(outcomes => {
-      if (outcomes.some(outcome => outcome.status === 'rejected')) {
-        retryExecutorAt = Date.now() + Math.min(5000, 500 * 2 ** Math.min(4, executorFailures++));
-        events.record({ event: 'core_retry' });
-        if (debug) console.error('Local MCP failed readiness checks. Retry delay:', retryExecutorAt - Date.now(), 'ms');
-      } else {
-        executorFailures = 0;
-        retryExecutorAt = 0;
-      }
+    executorRecovery = desktopCore().then(() => {
+      executorFailures = 0;
+      retryExecutorAt = 0;
+    }, () => {
+      retryExecutorAt = Date.now() + Math.min(5000, 500 * 2 ** Math.min(4, executorFailures++));
+      events.record({ event: 'core_retry' });
+      if (debug) console.error('Local MCP failed readiness checks. Retry delay:', retryExecutorAt - Date.now(), 'ms');
     }).finally(() => { executorRecovery = undefined; });
   }
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => shutdown.abort());
@@ -174,17 +146,8 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         effective = capability(job.op, job.args);
         if (!cfg.capabilities.includes(effective)) throw new Error('Operation denied by local Agent configuration.');
         const args = operations[job.op].parse(job.args);
-        let command: z.infer<typeof proposal>['command'];
-        if (job.op === 'start_command') {
-          const x = operations.start_command.parse(args);
-          const p = cfg.profiles[x.profile];
-          if (!Object.hasOwn(cfg.profiles, x.profile) || !p) throw new Error('Unknown local command profile.');
-          const cwd = await workspacePath(cfg.workspace, x.cwd, { root: true });
-          if (!cwd.info?.isDirectory()) throw new Error('Command cwd must be a workspace directory.');
-          command = { executable: p.executable, args: [...p.prefixArgs, ...x.args], cwd: cwd.path };
-        }
         if (effective !== 'read') {
-          const req = { job: { ...job, args }, command, nonce: randomUUID(), expires: Date.now() + approvalMs };
+          const req = { job: { ...job, args }, nonce: randomUUID(), expires: Date.now() + approvalMs };
           const request = JSON.stringify(req);
           const pending = filename(cfg, job.id, 'pending'), decision = filename(cfg, job.id, 'decision');
           await writeFile(pending, request, { flag: 'wx', mode: 0o600 });
@@ -214,14 +177,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         if (job.op === 'disconnect') {
           state('succeeded', 'Remote Agent is disconnecting. Restart it locally to accept remote work again.');
           disconnectTask = job.id;
-        } else if (command) {
-          const x = operations.start_command.parse(args);
-          const cwd = await workspacePath(cfg.workspace, x.cwd, { root: true });
-          if (!cwd.info?.isDirectory() || cwd.path !== command.cwd) throw new Error('Working directory changed before launch.');
-          const out = await runCommand(command.executable, command.args, command.cwd, x.timeoutSeconds ?? 600, signal, output => state('running', output));
-          state(out.status, out.output);
-        } else if (job.op === 'dc_call' || job.op === 'dc_resource') {
-          if (!cfg.desktopCommander) throw new Error('Desktop Commander core is disabled in this Agent.');
+        } else {
           const core = await desktopCore();
           let result;
           if (job.op === 'dc_call') {
@@ -237,11 +193,6 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
           const output = result.content.map(item => item.type === 'text' ? item.text : '[' + item.type + ']').join('\n');
           state(result.isError ? 'failed' : 'succeeded', clip(output));
           active.state = { ...active.state, result };
-        } else {
-          const local = await localCore();
-          const out = CallToolResultSchema.parse(await local.callTool({ name: job.op, arguments: args }, CallToolResultSchema, { signal, timeout: 30000 }));
-          const output = out.content.map(c => c.type === 'text' ? c.text : '').filter(Boolean).join('\n');
-          state(out.isError ? 'failed' : 'succeeded', clip(output));
         }
       } catch (e) {
         const cancelled = signal.aborted;
@@ -254,8 +205,8 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
     })();
   }
   async function poll() {
-    const ready = !disconnectTask && !!client && (!cfg.desktopCommander || !!dcClient);
-    const catalogToSend = cfg.desktopCommander ? dcCatalog : emptyCatalog;
+    const ready = !disconnectTask && !!dcClient;
+    const catalogToSend = dcCatalog;
     const response = await fetchJson(cfg, '/device/sync', {
       boot, platform: process.platform, ready, updates: [...jobs.values()].map(j => j.state),
       ...(!catalogSynced && catalogToSend ? { catalog: catalogToSend } : {})
@@ -269,18 +220,17 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
     if (!response.ok) throw new Error(`Gateway sync HTTP ${response.status}`);
     const reply = syncReply.parse(await response.json());
     lastSync = Date.now();
-    if (catalogToSend && (!cfg.desktopCommander || catalogToSend === dcCatalog)) catalogSynced = true;
+    if (catalogToSend && catalogToSend === dcCatalog) catalogSynced = true;
     if (disconnectTask && reply.ack.includes(disconnectTask)) shutdown.abort();
     for (const id of reply.ack) if (jobs.has(id) && terminal.some(s => s === jobs.get(id)!.state.status)) jobs.delete(id);
     for (const id of reply.cancel) jobs.get(id)?.abort.abort();
     if (!shutdown.signal.aborted && !disconnectTask) {
       for (const job of reply.jobs) start(job, reply.cancel.includes(job.id));
-      if (!ready) recoverExecutors();
+      if (!ready) recoverExecutor();
     }
     return ready;
   }
-  const emptyCatalog: Catalog = { tools: [], resources: [] };
-  recoverExecutors();
+  recoverExecutor();
   let retry = 700, connected = false, disconnectedNotice = false;
   try {
     while (!shutdown.signal.aborted) {
@@ -303,7 +253,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         lastSync = 0;
         if (!disconnectedNotice) {
           events.record({ event: 'gateway_unreachable' });
-          console.error('Gateway unreachable; retrying. Running commands keep their local deadline.');
+          console.error('Gateway unreachable; retrying.');
           disconnectedNotice = true;
         }
         connected = false;
@@ -320,7 +270,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
     for (const job of jobs.values()) job.abort.abort();
     await Promise.allSettled([...jobs.values()].map(j => j.finished));
     await executorRecovery;
-    await Promise.allSettled([client?.close(), dcClient?.close()]);
+    await dcClient?.close().catch(() => {});
     await fetchJson(cfg, '/device/offline', { boot }, auth.credential).catch(() => {});
     events.record({ event: 'stopped' });
     await events.flush();

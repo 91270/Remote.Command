@@ -14,7 +14,7 @@ const modulePath = 'dist/remote-device/desktop-commander-integration.js';
 const original = await readFile(join(root, modulePath), 'utf8');
 const sha256 = createHash('sha256').update(original).digest('hex');
 assert.equal(sha256, '7231a403268873bb924219381919190ab0b789134fb05ba7ae3b818cb519ccd7');
-const target = await mkdtemp(join(tmpdir(), 'prm-official-bridge-'));
+const target = await mkdtemp(join(tmpdir(), 'rcm-official-bridge-'));
 const bridgeFile = join(target, modulePath);
 const childFile = join(target, 'dist', 'index.js');
 const sdk = entry => JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/' + entry));

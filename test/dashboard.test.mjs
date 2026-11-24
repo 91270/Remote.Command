@@ -11,7 +11,7 @@ import { Store } from '../dist/store.js';
 import { secret, hash } from '../dist/protocol.js';
 
 test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, revocation and logout', async () => {
-  const temp = await mkdtemp(join(tmpdir(), 'prm-dashboard-'));
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-dashboard-'));
   const store = new Store(join(temp, 'gateway.sqlite'));
   const ownerKey = secret();
   let dashboard;
@@ -52,6 +52,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     const login = await request('/api/login', { ownerKey });
     assert.equal(login.status, 200);
     const rawCookie = login.headers.get('set-cookie');
+    assert.match(rawCookie, /^rcm_dashboard=/);
     assert.match(rawCookie, /HttpOnly; SameSite=Strict/);
     cookie = rawCookie.split(';')[0];
     csrf = (await login.json()).csrf;
@@ -85,7 +86,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     store.sync(paired.id, randomUUID(), 'linux', []);
     assert.equal((await request('/api/devices/' + paired.id + '/rename', { name: 'Build machine' })).status, 200);
     assert.equal(store.devices()[0].name, 'Build machine');
-    const task = store.submit(paired.id, 'read_file', { path: 'hello.txt' });
+    const task = store.submit(paired.id, 'dc_call', { tool: 'read_file', arguments: { path: 'hello.txt' } });
     const listed = await (await request('/api/tasks?device=' + paired.id)).json();
     assert.equal(listed.tasks[0].id, task.id);
     assert.equal(Object.hasOwn(listed.tasks[0], 'output'), false);
@@ -101,7 +102,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     store.sync(second.id, randomUUID(), 'linux', []);
     const thirdCredential = secret();
     const third = store.pair(store.invite('Third', ['read']), thirdCredential);
-    const pendingTask = store.submit(second.id, 'read_file', { path: 'pending.txt' });
+    const pendingTask = store.submit(second.id, 'dc_call', { tool: 'read_file', arguments: { path: 'pending.txt' } });
     const pendingInvite = store.invite('Pending', ['read']);
     store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(secret()), 'device-enrollment', Date.now() + 60000, '{}');
     store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(secret()), 'access', Date.now() + 60000, '{}');

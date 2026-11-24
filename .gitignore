@@ -1,9 +1,12 @@
 node_modules
 dist/
 .env*
-!.env.example
 state/
 /data/
+/secrets/
+.oauth_client_secret
+.owner_key
+.rcm-credential-*/
 agent.local.json
 agent.*.local.json
 identity.json

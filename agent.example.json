@@ -7,11 +7,5 @@
     "write",
     "exec"
   ],
-  "profiles": {
-    "node": {
-      "executable": "/absolute/path/to/node"
-    }
-  },
-  "desktopCommander": true,
   "noSleep": true
 }

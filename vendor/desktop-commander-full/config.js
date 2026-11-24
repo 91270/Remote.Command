@@ -2,8 +2,8 @@ import path from 'path';
 import os from 'os';
 // Use user's home directory for configuration files
 export const USER_HOME = os.homedir();
-const CONFIG_DIR = process.env.PRM_CORE_STATE;
-if (!CONFIG_DIR || !path.isAbsolute(CONFIG_DIR)) throw new Error('PRM_CORE_STATE must be an absolute private directory.');
+const CONFIG_DIR = process.env.RCM_CORE_STATE;
+if (!CONFIG_DIR || !path.isAbsolute(CONFIG_DIR)) throw new Error('RCM_CORE_STATE must be an absolute private directory.');
 // Paths relative to the config directory
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export const TOOL_CALL_FILE = path.join(CONFIG_DIR, 'claude_tool_call.log');

@@ -24,11 +24,11 @@ const output = result => result.content.filter(entry => entry.type === 'text').m
 const quote = value => '"' + value.replaceAll('"', '\\"') + '"';
 
 test('full MIT core exposes native tools, resources, sessions, configuration and document formats', { timeout: 90000 }, async t => {
-  const folder = await realpath(await mkdtemp(join(tmpdir(), 'prm-dc-core-')));
+  const folder = await realpath(await mkdtemp(join(tmpdir(), 'rcm-dc-core-')));
   const workspace = join(folder, 'workspace'), privateState = join(folder, 'core');
   await mkdir(workspace);
   await mkdir(privateState, { mode: 0o700 });
-  let chromePath = process.env.PRM_TEST_CHROME_PATH;
+  let chromePath = process.env.RCM_TEST_CHROME_PATH;
   if (!chromePath && process.platform === 'darwin') {
     const candidate = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
     try { await access(candidate); chromePath = candidate; } catch {}
@@ -39,10 +39,10 @@ test('full MIT core exposes native tools, resources, sessions, configuration and
   const transport = new StdioClientTransport({
     command: process.execPath, args: [resolve('dist/dc-core.js')], cwd: workspace,
     env: { PATH: process.env.PATH, ...(process.platform === 'win32' && { SystemRoot: process.env.SystemRoot }),
-      PRM_WORKSPACE: workspace, PRM_CORE_STATE: privateState, PRM_RIPGREP: ripgrep,
-      ...(chromePath && { PRM_CHROME_PATH: chromePath }) }, stderr: 'pipe'
+      RCM_WORKSPACE: workspace, RCM_CORE_STATE: privateState, RCM_RIPGREP: ripgrep,
+      ...(chromePath && { RCM_CHROME_PATH: chromePath }) }, stderr: 'pipe'
   });
-  const client = new Client({ name: 'private-remote-core-test', version: '0.2.0' });
+  const client = new Client({ name: 'remote-command-core-test', version: '0.2.0' });
   let diagnostics = '';
   transport.stderr?.setEncoding('utf8').on('data', data => { diagnostics = (diagnostics + data).slice(-12000); });
   client.setNotificationHandler(LoggingMessageNotificationSchema, async ({ params }) => {

@@ -45,7 +45,7 @@ class ToolHistory {
         this.writeQueue = [];
         this.isWriting = false;
         // Store history in same directory as config to keep everything together
-        const historyDir = process.env.PRM_CORE_STATE;
+        const historyDir = process.env.RCM_CORE_STATE;
         // Ensure directory exists
         if (!fs.existsSync(historyDir)) {
             fs.mkdirSync(historyDir, { recursive: true });

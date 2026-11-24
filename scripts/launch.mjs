@@ -7,7 +7,7 @@ const project = fileURLToPath(new URL('..', import.meta.url));
 const args = process.argv.slice(2);
 const first = args[0];
 if (first === '--help' || first === '-h') {
-  console.log('Usage: ./launch.sh [CONFIG] [--logout|--report] [--no-upload] [--no-browser] [--no-persist-session] [--disable-no-sleep] [--debug]');
+  console.log('Usage: ./launch.sh [CONFIG] [--logout|--report] [--no-browser] [--no-persist-session] [--disable-no-sleep] [--debug]');
   console.log('On Windows: .\\launch.ps1 [CONFIG] [options]');
   process.exit(0);
 }

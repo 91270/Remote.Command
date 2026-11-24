@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { readFile, writeFile, unlink, stat, rename, mkdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
-import { hash, secret, uuid, errorText } from './protocol.js';
+import { agentClientId, hash, secret, uuid, errorText } from './protocol.js';
 import { recentClientEvents } from './client-events.js';
 import type { AgentConfig } from './agent-config.js';
 
@@ -54,7 +54,7 @@ function openBrowser(url: string) {
 async function browserEnrollment(cfg: AgentConfig, browser: boolean): Promise<DeviceIdentity> {
   const proof = secret(), credential = secret();
   const response = await fetchDevice(cfg, '/device/start', {
-    client_id: 'private-remote-agent', device_name: hostname().slice(0, 80) || 'Remote Command Agent',
+    client_id: agentClientId, device_name: hostname().slice(0, 80) || 'Remote Command Agent',
     code_challenge: hash(proof), code_challenge_method: 'S256'
   });
   if (!response.ok) throw new Error('Gateway could not start device authorization.');
@@ -72,7 +72,7 @@ async function browserEnrollment(cfg: AgentConfig, browser: boolean): Promise<De
     let result: Response;
     try {
       result = await fetchDevice(cfg, '/device/poll', {
-        client_id: 'private-remote-agent', device_code: offer.device_code, code_verifier: proof, credential
+        client_id: agentClientId, device_code: offer.device_code, code_verifier: proof, credential
       });
     } catch { continue; }
     if (result.status >= 500) continue;
@@ -148,7 +148,7 @@ export async function deviceReport(cfg?: AgentConfig) {
   }
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const report = { generatedAt: new Date().toISOString(), version: manifest.version, platform: platform(), architecture: arch(),
-    node: process.version, deviceId, gatewayOrigin: cfg?.origin ?? null, desktopCommander: cfg?.desktopCommander ?? null, checks };
+    node: process.version, deviceId, gatewayOrigin: cfg?.origin ?? null, checks };
   const packageName = 'pizzip';
   const { default: Zip } = await import(packageName);
   const zip = new Zip();
@@ -162,7 +162,7 @@ export async function deviceReport(cfg?: AgentConfig) {
 }
 export async function deviceStatus(cfg: AgentConfig) {
   const auth = identity.parse(JSON.parse(await readFile(join(cfg.stateDir, 'identity.json'), 'utf8')));
-  console.log(JSON.stringify({ device: auth.id, gateway: cfg.origin, desktopCommander: cfg.desktopCommander,
+  console.log(JSON.stringify({ device: auth.id, gateway: cfg.origin,
     platform: platform(), localIdentityPresent: true }, null, 2));
 }
 export async function agentLock(cfg: AgentConfig) {

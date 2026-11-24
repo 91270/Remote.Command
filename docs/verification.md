@@ -20,22 +20,19 @@
 
 ```sh
 npm ci --include=dev --ignore-scripts
-PRM_TEST_FULL=1 npm test
+npm test
 ```
 
 macOS/Linux 可通过实际启动器测试完整 TLS 链路。需要 Python 3 和 OpenSSL。
 
 ```sh
-PRM_TEST_LAUNCH=1 PRM_TEST_FULL=1 PRM_TEST_TLS=1 PRM_TEST_TTY=1 node --test test/e2e.test.mjs
+RCM_TEST_LAUNCH=1 RCM_TEST_TLS=1 RCM_TEST_TTY=1 npm test
 ```
 
-Markdown 转 PDF 通过 `PRM_TEST_CHROME_PATH` 指定本机 Chrome。宿主机 `8787` 空闲时，可在独立源码副本验证本地构建的 Gateway 镜像。显式指定测试数据目录，避免复用生产数据库。
+Markdown 转 PDF 通过 `RCM_TEST_CHROME_PATH` 指定本机 Chrome。宿主机 `8787` 空闲时，可在独立源码副本按[首次部署说明](production.md#1-首次部署)准备测试数据目录。将测试 Compose 的 `image` 改为 `remote-command:compose-test` 后运行以下命令。
 
 ```sh
-npm run setup -- mcp.invalid.example
 docker build -t remote-command:compose-test .
-export RCM_GATEWAY_IMAGE=remote-command:compose-test
-export RCM_DATA_DIR="$(mktemp -d)/gateway-data"
 docker compose -p rcm-verify config -q
 docker compose -p rcm-verify up -d --pull never --wait --wait-timeout 45
 docker compose -p rcm-verify port gateway 8787
@@ -43,7 +40,7 @@ curl --fail http://127.0.0.1:8787/readyz
 docker compose -p rcm-verify down
 ```
 
-数据目录初始化与容器重建后的持久化，以及 Nginx HTTPS、OAuth 资源发现和同步请求体检查位于 GitHub Actions 的 `compose` 作业。生产环境验收步骤见[运维指南](production.md#1-首次部署)。
+GitHub Actions 的 `compose` 作业覆盖非 root 运行、密钥首次初始化、容器重建后的持久化，以及 Nginx HTTPS、OAuth 资源发现和同步请求体检查。
 
 Windows、生产域名和 ChatGPT 账号的验收步骤见[部署与启动说明](../README.md)。官方生产账户、计费、遥测及宿主审核流程与独立客户端的范围对照见[架构说明](architecture.md)。
 
@@ -56,37 +53,37 @@ Windows、生产域名和 ChatGPT 账号的验收步骤见[部署与启动说明
 | Linux 已安装客户端 | Debian bookworm x86_64 容器、Node.js 24.22.3。独立安装后 `remote --help` 可运行，随包平台版 ripgrep 可执行。 |
 | 管理页 | 在实际 Chrome 中打开配对弹窗，验证复制动作传入的命令和一次性令牌切换。 |
 
-## Remote Command MCP 0.3.0
+## Remote.Command 0.3.0
 
 | 检查 | 结果 |
 | --- | --- |
-| 新包名与升级 | 从工程外安装并运行 `npx`。已验证新客户端能读取旧默认路径中的配置，已有设备和任务结果通过数据库升级测试。 |
+| 客户端与数据库 | 从工程外安装并运行 `npx`。设备和任务结果通过数据库升级测试。 |
 | HTTPS 端到端 | 从新安装包启动 Agent，9 项通过。新增审阅资源和参数回显校验，预览未入队。跨设备后台记录可查询并支持设备过滤。配对码必须有效且待处理才可核对设备名称。 |
 | Chrome 控制台 | 验证登录、桌面与手机布局、设备搜索、最近调用、配对核对与授权、任务结果、审计搜索和接入地址。 |
 | 审阅界面 | 在 Chrome 的模拟 MCP Apps 宿主中验证点击后发送一次普通 `tools/call`，并验证被拦截的预览没有发送调用。真实 ChatGPT 网页宿主和 Windows 实机待验收。 |
 | Docker Gateway | 在 Linux 容器验证镜像启动、健康检查、新控制台、OAuth 发现和审阅资源打包。本机外置盘的直接构建遇到 BuildKit 读取 macOS 扩展属性报错，使用下方归档上下文构建通过。 |
 
-在 macOS 或 Linux 上复跑当前安装包的端到端测试，需要 Python 3、OpenSSL 和用于渲染 PDF 的 Chrome 或 Chromium。
+在 macOS 或 Linux 上复跑安装包的端到端测试。TLS 与终端交互使用 OpenSSL 和 Python 3，Markdown 转 PDF 需 Chrome 或 Chromium。
 
 ```sh
 npm run package:client
-prm_install=$(mktemp -d)
-npm install --prefix "$prm_install" --ignore-scripts "$PWD/releases/remote-command-mcp-0.3.0.tgz"
-PRM_TEST_FULL=1 PRM_TEST_TLS=1 PRM_TEST_TTY=1 \
-  PRM_TEST_PACKED_CLI="$prm_install/node_modules/.bin/remote-command-mcp" npm test
+rcm_install=$(mktemp -d)
+npm install --prefix "$rcm_install" --ignore-scripts "$PWD/releases/remote-command-0.5.0.tgz"
+RCM_TEST_TLS=1 RCM_TEST_TTY=1 \
+  RCM_TEST_PACKED_CLI="$rcm_install/node_modules/.bin/remote-command" npm test
 ```
 
-如 macOS 外置盘上的 Docker 构建报 `failed to xattr`，可在工程根目录将构建上下文打包后传给 Docker。使用 Compose 默认项目名时，镜像命令如下。完成 `.env` 配置后可以用 `docker compose up -d --no-build` 启动。
+如 macOS 外置盘上的 Docker 构建报 `failed to xattr`，可将构建上下文打包后传给 Docker。构建完成后，将测试 Compose 的 `image` 设为 `remote-command:local`。
 
 ```sh
 tar --no-xattrs --no-mac-metadata --exclude='._*' -cf - \
   Dockerfile .dockerignore .npmrc tsconfig.json src web \
   deploy/gateway/package.json deploy/gateway/package-lock.json \
   vendor/desktop-commander-full/catalog.json \
-  | docker build -t private-remote-mcp-gateway -
+  | docker build -t remote-command:local -
 ```
 
-## Remote Command MCP 0.4.0
+## Remote.Command 0.4.0
 
 | 检查 | 结果 |
 | --- | --- |
@@ -99,7 +96,7 @@ tar --no-xattrs --no-mac-metadata --exclude='._*' -cf - \
 
 部署、备份、恢复和服务命令见 [生产运维](production.md)。上游执行路径与自建差异见 [官方架构核对](official-architecture.md)。
 
-## Remote Command MCP 0.4.1
+## Remote.Command 0.4.1
 
 | 检查 | 结果 |
 | --- | --- |

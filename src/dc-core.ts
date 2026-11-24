@@ -2,17 +2,18 @@ import { mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { projectVersion } from './protocol.js';
 
 const [mode, output] = process.argv.slice(2);
 const catalogOutput = output ? resolve(output) : undefined;
-const privateState = process.env.PRM_CORE_STATE;
+const privateState = process.env.RCM_CORE_STATE;
 if (!privateState || !isAbsolute(privateState)) {
-  throw new Error('Set PRM_CORE_STATE to the private state directory assigned by the Agent.');
+  throw new Error('Set RCM_CORE_STATE to the private state directory assigned by the Agent.');
 }
 await mkdir(privateState, { recursive: true, mode: 0o700 });
-const workspace = await realpath(process.env.PRM_WORKSPACE ?? process.cwd());
+const workspace = await realpath(process.env.RCM_WORKSPACE ?? process.cwd());
 process.chdir(workspace);
-process.env.PRM_WORKSPACE = workspace;
+process.env.RCM_WORKSPACE = workspace;
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 process.env.DC_REMOTE_DEVICE = 'true';
 (globalThis as Record<string, unknown>).disableOnboarding = true;
@@ -60,7 +61,7 @@ const cleanup = () => closing ??= (async () => {
 if (mode === '--catalog') {
   const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
-  const client = new Client({ name: 'private-remote-catalog', version: '0.2.0' });
+  const client = new Client({ name: 'remote-command-catalog', version: projectVersion });
   await client.connect(clientTransport);
   const [tools, resources] = await Promise.all([client.listTools(), client.listResources()]);
   const catalogTools = tools.tools.map(tool => tool.name === 'start_process' ? {

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 // Get the directory where the MCP is installed (for ES module imports)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const mcpRoot = process.cwd(); // Private Remote MCP: temporary execution belongs to the selected workspace.
+const mcpRoot = process.cwd(); // Remote.Command: temporary execution belongs to the selected workspace.
 // Track virtual Node sessions (PIDs that are actually Node fallback sessions)
 const virtualNodeSessions = new Map();
 let virtualPidCounter = -1000; // Use negative PIDs for virtual sessions

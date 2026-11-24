@@ -7,7 +7,6 @@ const event = z.strictObject({
   at: z.iso.datetime(),
   event: z.enum(['starting', 'core_ready', 'core_disconnected', 'core_retry', 'gateway_online',
     'gateway_unreachable', 'pairing_revoked', 'stopped']),
-  executor: z.enum(['desktop-commander', 'basic']).optional(),
   pid: z.number().int().positive().optional()
 });
 type Event = Omit<z.infer<typeof event>, 'at'>;

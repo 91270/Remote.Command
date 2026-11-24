@@ -65,7 +65,7 @@ sequenceDiagram
 
 [官方设备管理](https://github.com/desktop-commander/remote-desktop-commander/blob/main/docs/SETUP.md) · [官方数据隐私说明](https://desktopcommander.app/help/security-privacy/data-privacy) · [审阅与宿主拦截](https://desktopcommander.app/help/troubleshooting/tool-call-blocked-by-safety-checks) · [重启后的连接提示](https://desktopcommander.app/help/troubleshooting/remote-cant-find-computer) · [自建运维说明](production.md)
 
-0.4.1 已把最后连接时间与在线状态分开保存，控制台支持一次撤销所有设备及待处理配对。Agent 完成任务会立即同步终态，派发仍通过由设备发起的 HTTPS 同步。[版本验证](verification.md#remote-command-mcp-041)
+0.4.1 已把最后连接时间与在线状态分开保存，控制台支持一次撤销所有设备及待处理配对。Agent 完成任务会立即同步终态，派发仍通过由设备发起的 HTTPS 同步。[版本验证](verification.md#remotecommand-041)
 
 ## 可复核的证据
 

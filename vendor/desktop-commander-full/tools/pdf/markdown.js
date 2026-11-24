@@ -585,7 +585,7 @@ async function installChrome() {
  * Results are cached to avoid repeated lookups
  */
 async function getChromePath() {
-    const executable = process.env.PRM_CHROME_PATH;
+    const executable = process.env.RCM_CHROME_PATH;
     if (!executable || !isAbsolute(executable) || !existsSync(executable)) return undefined;
     return executable;
 }

@@ -7,15 +7,12 @@ import { z } from 'zod';
 import { capabilities, endpoint } from './protocol.js';
 import { inside } from './workspace.js';
 
-const profileConfig = z.strictObject({ executable: z.string().refine(isAbsolute), prefixArgs: z.array(z.string()).max(16).default([]) });
 const config = z.strictObject({
   gateway: z.string(), workspace: z.string().refine(isAbsolute), stateDir: z.string().refine(isAbsolute),
   allowInsecureLoopback: z.boolean().default(false), capabilities: z.array(z.enum(capabilities)).min(1).max(3).default(['read']),
   noSleep: z.boolean().default(true),
-  desktopCommander: z.boolean().default(true),
   chromePath: z.string().refine(isAbsolute).optional(),
-  ripgrep: z.string().refine(isAbsolute).optional(),
-  profiles: z.record(z.string().regex(/^[a-zA-Z0-9_-]{1,48}$/), profileConfig).default({})
+  ripgrep: z.string().refine(isAbsolute).optional()
 });
 async function findExecutable(paths: (string | undefined)[], workspace: string) {
   for (const candidate of paths) {
@@ -84,11 +81,6 @@ export async function resolveAgentConfig(contents: unknown, configFile: string, 
   const approvalStat = await lstat(approvals);
   if (!approvalStat.isDirectory() || approvalStat.isSymbolicLink() || (process.platform !== 'win32' && (approvalStat.mode & 0o077) !== 0))
     throw new Error('Approval directory must be private and cannot be a link.');
-  for (const p of diagnostics ? [] : Object.values(cfg.profiles)) {
-    p.executable = await realpath(p.executable);
-    if (inside(workspace, p.executable) || !(await lstat(p.executable)).isFile() || p.prefixArgs.some(a => a.includes('\0')) ||
-        (process.platform === 'win32' && !/\.exe$/i.test(p.executable))) throw new Error('Profiles must point to trusted executables outside the workspace.');
-  }
   const rgExecutable = process.platform === 'win32' ? 'rg.exe' : 'rg';
   const ripgrep = cfg.ripgrep
     ? (diagnostics ? cfg.ripgrep : await realpath(cfg.ripgrep))

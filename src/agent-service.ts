@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './agent-config.js';
 import { agentLock, identity, identityFile } from './client-commands.js';
-import { hash } from './protocol.js';
+import { agentClientId, hash } from './protocol.js';
 
 const actions = ['render', 'install', 'start', 'stop', 'status', 'remove'];
 const help = 'Usage: remote-command service render|install|start|stop|status|remove CONFIG';
@@ -68,7 +68,7 @@ export async function runService(args: string[]) {
   if (action === '--help' || action === '-h') { console.log(help); return; }
   if (args.length !== 2 || !action || !actions.includes(action) || !configFile) throw new Error(help);
   const cfgFile = await realpath(resolve(configFile));
-  const id = 'remote-command-mcp-' + hash(process.platform === 'win32' ? cfgFile.toLowerCase() : cfgFile).slice(0, 12).replace(/_/g, 'a');
+  const id = agentClientId + '-' + hash(process.platform === 'win32' ? cfgFile.toLowerCase() : cfgFile).slice(0, 12).replace(/_/g, 'a');
   const platform = process.platform;
   const label = platform === 'darwin' ? 'io.' + id : id;
   const cli = await realpath(fileURLToPath(new URL('./remote-cli.js', import.meta.url)));

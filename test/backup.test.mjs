@@ -22,8 +22,8 @@ test('online SQLite backup, verification and recovery without overwriting a live
     store.invite('unused invite', ['read']);
     store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(secret()), 'access', Date.now() + 60000, '{}');
     store.sync(device, randomUUID(), 'linux', []);
-    const done = store.submit(device, 'read_file', { path: 'hello.txt' });
-    const active = store.submit(device, 'read_file', { path: 'pending.txt' });
+    const done = store.submit(device, 'dc_call', { tool: 'read_file', arguments: { path: 'hello.txt' } });
+    const active = store.submit(device, 'dc_call', { tool: 'read_file', arguments: { path: 'pending.txt' } });
     store.finish(done.id, 'succeeded', 'retained output');
 
     const backup = run('backup', original);
