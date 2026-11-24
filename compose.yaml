@@ -1,60 +1,75 @@
-# Retain the project and volume identifiers used before the directory move.
+# Keep the project name so existing deployments can update in place.
 name: private-remote-mcp
+
+x-gateway-image: &gateway-image ${RCM_GATEWAY_IMAGE:-ghcr.io/91270/remote.command:0.4.1}
+# Use a dedicated host directory. See docs/production.md for initial setup and migration.
+x-gateway-storage: &gateway-storage
+  - type: bind
+    source: ${RCM_DATA_DIR:-./data}
+    target: /data
+    bind:
+      create_host_path: true
 
 services:
   gateway:
-    image: ${RCM_GATEWAY_IMAGE:-private-remote-mcp-gateway}
-    build: .
+    image: *gateway-image
+    pull_policy: missing
+    user: "1000:1000"
     init: true
     restart: unless-stopped
     stop_grace_period: 25s
     logging:
       driver: local
     environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Run npm run setup first}
-      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:?Run npm run setup first}
-      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?Run npm run setup first}
-      OWNER_KEY: ${OWNER_KEY:?Run npm run setup first}
-      OAUTH_REDIRECT_URIS: ${OAUTH_REDIRECT_URIS:?Run npm run setup first}
-      STATE_DB: ${STATE_DB:-/data/gateway.sqlite}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the external HTTPS origin in .env}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:?Set the OAuth client ID in .env}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:?Set the OAuth client secret in .env}
+      OWNER_KEY: ${OWNER_KEY:?Set the owner key in .env}
+      OAUTH_REDIRECT_URIS: ${OAUTH_REDIRECT_URIS:-https://chatgpt.com/connector_platform_oauth_redirect}
+      STATE_DB: &gateway-db ${STATE_DB:-/data/gateway.sqlite}
       RCM_TASK_RETENTION_DAYS: ${RCM_TASK_RETENTION_DAYS:-7}
       RCM_AUDIT_RETENTION_DAYS: ${RCM_AUDIT_RETENTION_DAYS:-90}
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    volumes:
-      - gateway-data:/data
-    networks: [backend]
+    volumes: *gateway-storage
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      gateway-data-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 15s
       timeout: 4s
       retries: 3
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    logging:
-      driver: local
+  gateway-data-init:
+    image: *gateway-image
+    pull_policy: missing
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    volumes: *gateway-storage
     environment:
-      DOMAIN: ${DOMAIN:?Run npm run setup first}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    networks: [edge, backend]
-    depends_on:
-      gateway:
-        condition: service_healthy
-
-networks:
-  edge: {}
-  backend:
-    internal: true
-volumes:
-  gateway-data: {}
-  caddy-data: {}
-  caddy-config: {}
+      STATE_DB: *gateway-db
+    entrypoint: ["node", "--input-type=module", "-e"]
+    command:
+      - |
+        import { chmodSync, chownSync, readdirSync, statSync } from 'node:fs';
+        import { resolve } from 'node:path';
+        const path = '/data';
+        const database = process.env.STATE_DB;
+        if (!database.startsWith(path + '/') || !resolve(database).startsWith(path + '/')) {
+          throw new Error('STATE_DB must be an absolute file path under /data.');
+        }
+        const { uid, gid, mode } = statSync(path);
+        if (uid === 1000 && gid === 1000 && (mode & 0o777) === 0o700) process.exit(0);
+        if (uid !== 0 || readdirSync(path).length) {
+          throw new Error('Use a dedicated RCM_DATA_DIR owned by 1000:1000 with mode 0700, or choose a new path.');
+        }
+        chmodSync(path, 0o700);
+        chownSync(path, 1000, 1000);

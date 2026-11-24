@@ -19,8 +19,8 @@
 
 ```mermaid
 flowchart LR
-  C["ChatGPT / MCP 客户端"] -- "HTTPS + OAuth 2.0 (/mcp)" --> P["Caddy 反向代理 (自动 TLS)"]
-  P --> G["自建 Gateway (认证 / 队列 / SQLite)"]
+  C["ChatGPT / MCP 客户端"] -- "HTTPS + OAuth 2.0 (/mcp)" --> P["宿主机 Nginx (自定义域名 / TLS)"]
+  P -- "127.0.0.1:8787" --> G["Gateway 容器 (认证 / 队列 / SQLite)"]
   A["本地 Agent (Windows / macOS / Linux)"] -- "主动 HTTPS 外连 (无需公网端口)" --> P
   A -- "stdio" --> D["Desktop Commander 0.3.3 核心 (25 工具)"]
 ```
@@ -36,24 +36,19 @@ flowchart LR
 
 ### 第一步：部署 Gateway 服务端
 
-> **前置条件**：一台拥有公网 IP 与域名的 Linux 服务器，已安装 **Docker Compose** 与 **Node.js 24–26**，域名已解析至服务器且开放 **TCP 80 / 443** 端口。
+在已安装 Docker Compose 和 Nginx 的 Linux 服务器上部署。将自定义域名解析到这台服务器，并为 Nginx 配置域名证书。公网客户端统一访问 HTTPS `443`。
 
-1. 从 [GitHub Release (v0.4.1)](https://github.com/91270/Remote.Command/releases/tag/v0.4.1) 下载部署包并解压，进入目录。
-2. 将 `mcp.example.com` 替换为你的实际域名并启动服务（若使用私有镜像，请先登录 `ghcr.io`）：
+1. 将当前 [compose.yaml](compose.yaml) 保存到服务器，在同目录填写 `.env`。配置公开 HTTPS 地址、OAuth 凭证和宿主机数据路径 `RCM_DATA_DIR`，字段见 [运维指南](docs/production.md#1-首次部署)。
+2. 执行以下命令。Compose 会按需从 GitHub Container Registry 拉取文件中指定版本的镜像，准备数据目录并启动 Gateway。
 
 ```sh
-# 生成 .env（含 OWNER_KEY、OAUTH_CLIENT_ID、OAUTH_CLIENT_SECRET 等，权限 0600）
-npm run setup -- mcp.example.com
-
-# 指定镜像版本并启动 Gateway + Caddy（自动签发 HTTPS 证书）
-printf '%s\n' 'RCM_GATEWAY_IMAGE=ghcr.io/91270/remote.command:0.4.1' >> .env
-docker compose up -d --no-build --pull always --wait
+docker compose up -d --wait
 ```
 
-3. 浏览器打开 `https://mcp.example.com/manage`，使用 `.env` 中的 `OWNER_KEY` 登录管理控制台。
+3. 在宿主机 Nginx 为域名配置证书并代理到 `127.0.0.1:8787`。配置示例见 [remote-command.conf](deploy/nginx/remote-command.conf)。用 `.env` 中的 `OWNER_KEY` 登录域名下的 `/manage`。
 
 > [!NOTE]
-> 设备配对记录与任务结果保存在 Docker 卷 `gateway-data` 中，配置保存在 `.env`。日常重启或升级时请务必保留二者。离线部署与升级指南见 [production.md](docs/production.md)。
+> 已发布的 v0.4.1 旧部署包使用 Caddy 和 Docker 命名卷。已有部署请先按 [运维指南](docs/production.md#3-升级与回退) 将旧数据库迁移到指定目录。
 
 ---
 
@@ -194,7 +189,7 @@ node dist/agent.js logout agent.local.json
 
 ### 服务端运维与备份
 
-除网页控制台 `/manage`（支持撤销单台/全部设备、撤销全部 OAuth 授权、查看在线状态与审计记录）外，还可使用服务端 CLI 与备份脚本：
+网页控制台 `/manage` 支持撤销设备、撤销 OAuth 授权和查看审计记录。同样可以在 Gateway 容器内调用管理命令。
 
 ```sh
 # 查看设备列表 / 生成一次性配对邀请 / 撤销设备 / 撤销 OAuth / 查看审计日志
@@ -203,10 +198,9 @@ docker compose exec gateway node dist/admin.js pair laptop read,write,exec
 docker compose exec gateway node dist/admin.js revoke <DEVICE_ID>
 docker compose exec gateway node dist/admin.js oauth-revoke
 docker compose exec gateway node dist/admin.js audit
-
-# 导出运行中的 Gateway SQLite 数据库备份
-npm run backup -- /private/path/backup.sqlite
 ```
+
+在线备份和恢复步骤见 [运维指南](docs/production.md#6-在线备份与恢复演练)。
 
 ---
 

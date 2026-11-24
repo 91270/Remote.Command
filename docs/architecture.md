@@ -8,9 +8,10 @@
 
 ```mermaid
 flowchart LR
-    User["ChatGPT / MCP 客户端"] -->|OAuth S256 & Streamable HTTP| Gateway["自建 Gateway"]
-    Owner["Web 管理控制台 (/manage)"] -->|配对授权与设备管理| Gateway
-    Agent["设备端 Agent"] -->|HTTPS 主动外连同步| Gateway
+    User["ChatGPT / MCP 客户端"] -->|OAuth S256 & Streamable HTTP| Nginx["宿主机 Nginx / HTTPS"]
+    Owner["Web 管理控制台 (/manage)"] -->|配对授权与设备管理| Nginx
+    Agent["设备端 Agent"] -->|HTTPS 主动外连同步| Nginx
+    Nginx -->|127.0.0.1:8787| Gateway["Gateway 容器"]
     Gateway --> Storage["SQLite (任务 / 设备 / 审计)"]
     Agent -->|stdio| Core["Desktop Commander 0.3.3 核心"]
     Agent -->|stdio| Compat["兼容核心 (remote_*)"]
@@ -36,7 +37,7 @@ flowchart LR
 | **状态与一致性** | SQLite 持久化派发、审批、执行与终态；同一 Agent 通过启动 ID 与任务 ID 去重并重传终态直到确认；实例替换或正常退出时，未确认任务标为 `interrupted`。 |
 | **安全边界** | 服务端配对权限与本机配置取交集，敏感操作需设备终端逐次审批；文件工具在解析路径后校验 `workspace` 与 `allowedDirectories` 上限；已获批命令继承运行 Agent 的 OS 用户权限。 |
 | **进程与队列配额** | 原生进程工具采用 PID 与持久会话语义（终止进程需显式调用 `force_terminate` 或 `kill_process`，取消 MCP 请求仅撤回等待/排队）。每台设备上限为 **4 个并发任务**、**64 个排队任务**，结果默认保留 **7 天**。 |
-| **诊断与部署** | 设备仅发起出站 HTTPS 连接；生产环境由 Caddy 代理 TLS；诊断 ZIP 使用受控字段与有界日志，不含敏感内容。 |
+| **诊断与部署** | 设备主动发起 HTTPS 连接。宿主机 Nginx 负责域名与 TLS，Gateway 容器仅在宿主机回环地址发布端口。诊断 ZIP 使用受控字段与有界日志。 |
 | **npm 独立客户端** | 独立 `.tgz` 提供 `remote` 子命令及同名启动、会话、后台服务与诊断参数，内置 MIT 本地核心、运行依赖清单与锁文件。 |
 
 ---

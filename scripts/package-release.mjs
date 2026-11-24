@@ -18,8 +18,9 @@ const stem = `${manifest.name}-${manifest.version}`;
 const stage = await mkdtemp(join(tmpdir(), 'rcm-release-'));
 const directory = join(stage, stem);
 const releases = join(root, 'releases');
-const sourceFiles = ['.dockerignore', '.npmrc', 'Dockerfile', 'Caddyfile', 'compose.yaml', 'package.json', 'tsconfig.json',
+const sourceFiles = ['.dockerignore', '.npmrc', 'Dockerfile', 'compose.yaml', 'package.json', 'tsconfig.json', 'README.md',
   'scripts/setup.mjs', 'scripts/backup.mjs', 'docs/production.md', 'docs/verification.md', 'src', 'web', 'deploy/gateway',
+  'deploy/nginx/remote-command.conf',
   'vendor/desktop-commander-full/catalog.json', 'vendor/desktop-commander-full/LICENSE'];
 
 async function stageEntry(path) {
@@ -57,11 +58,20 @@ async function sha(file) {
 
 try {
   for (const path of sourceFiles) await stageEntry(path);
+  const stagedCompose = join(directory, 'compose.yaml');
+  const compose = await readFile(stagedCompose, 'utf8');
+  const imageTag = /^(x-gateway-image: &gateway-image \$\{RCM_GATEWAY_IMAGE:-ghcr\.io\/[^{}:\s]+:)[^{}\s]+(\})$/m;
+  if (!imageTag.test(compose)) throw new Error('Expected a GHCR default image in compose.yaml.');
+  await writeFile(stagedCompose, compose.replace(imageTag, (_, prefix, suffix) => prefix + manifest.version + suffix));
+
   const client = stem + '.tgz';
   execFileSync(process.execPath, [join(root, 'scripts', 'package-client.mjs'), stage], { stdio: 'inherit' });
   await copyFile(join(stage, client), join(directory, client));
-  const files = [client, stem + '-deploy.tar.gz'];
-  execFileSync('tar', ['-czf', join(stage, files[1]), '-C', stage, stem], { stdio: 'inherit' });
+  const composeFile = stem + '-compose.yaml';
+  const deployment = stem + '-deploy.tar.gz';
+  const files = [client, composeFile, deployment];
+  await copyFile(stagedCompose, join(stage, composeFile));
+  execFileSync('tar', ['-czf', join(stage, deployment), '-C', stage, stem], { stdio: 'inherit' });
 
   if (args.includes('--with-image')) {
     execFileSync('docker', ['build', '--tag', tag, directory], { stdio: 'inherit' });

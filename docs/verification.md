@@ -29,15 +29,21 @@ macOS/Linux 可通过实际启动器测试完整 TLS 链路。需要 Python 3 �
 PRM_TEST_LAUNCH=1 PRM_TEST_FULL=1 PRM_TEST_TLS=1 PRM_TEST_TTY=1 node --test test/e2e.test.mjs
 ```
 
-Markdown 转 PDF 通过 `PRM_TEST_CHROME_PATH` 指定本机 Chrome。Compose 私网 Gateway 的验证可在独立测试副本运行。
+Markdown 转 PDF 通过 `PRM_TEST_CHROME_PATH` 指定本机 Chrome。宿主机 `8787` 空闲时，可在独立源码副本验证本地构建的 Gateway 镜像。显式指定测试数据目录，避免复用生产数据库。
 
 ```sh
 npm run setup -- mcp.invalid.example
-docker compose config -q
-docker compose up --build -d --wait --wait-timeout 45 gateway
-docker compose exec gateway node -e "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exitCode=1;else console.log('healthy')})"
-docker compose down
+docker build -t remote-command:compose-test .
+export RCM_GATEWAY_IMAGE=remote-command:compose-test
+export RCM_DATA_DIR="$(mktemp -d)/gateway-data"
+docker compose -p rcm-verify config -q
+docker compose -p rcm-verify up -d --pull never --wait --wait-timeout 45
+docker compose -p rcm-verify port gateway 8787
+curl --fail http://127.0.0.1:8787/readyz
+docker compose -p rcm-verify down
 ```
+
+数据目录初始化与容器重建后的持久化，以及 Nginx HTTPS、OAuth 资源发现和同步请求体检查位于 GitHub Actions 的 `compose` 作业。生产环境验收步骤见[运维指南](production.md#1-首次部署)。
 
 Windows、生产域名和 ChatGPT 账号的验收步骤见[部署与启动说明](../README.md)。官方生产账户、计费、遥测及宿主审核流程与独立客户端的范围对照见[架构说明](architecture.md)。
 
