@@ -269,7 +269,8 @@ export class OAuth {
       const inputs = [...fieldsData, ['until', until], ['proof', proof]].map(([k, v]) =>
         `<input type="hidden" name="${escapeHtml(k!)}" value="${escapeHtml(v!)}">`).join('');
       const clientLabel = escapeHtml(client.clientName || client.clientId);
-      const redirectOrigin = escapeHtml(new URL(redirectUri).origin);
+      const rawRedirectOrigin = new URL(redirectUri).origin;
+      const redirectOrigin = escapeHtml(rawRedirectOrigin);
       const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remote.Command authorization</title>
 <h1>Authorize Remote.Command</h1>
 <p>Client <strong>${clientLabel}</strong> wants to access your paired devices and redirect to <code>${redirectOrigin}</code>. Changes and commands still require confirmation on the device.</p>
@@ -282,7 +283,7 @@ export class OAuth {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'strict-origin',
-        'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        'Content-Security-Policy': `default-src 'none'; form-action 'self' ${rawRedirectOrigin}; frame-ancestors 'none'; base-uri 'none'`
       }).end(html);
       return;
     }

@@ -122,6 +122,7 @@ test('OAuth discovery exposes registration_endpoint and DCR completes full autho
     });
     const authPageRes = await fetch(authMeta.authorization_endpoint + '?' + authQuery.toString());
     assert.equal(authPageRes.status, 200);
+    assert.match(authPageRes.headers.get('content-security-policy'), /form-action 'self' https:\/\/chatgpt\.com/);
     const html = await authPageRes.text();
     assert.match(html, /ChatGPT/);
     assert.match(html, /name="username"/);
