@@ -81,7 +81,7 @@ cd releases
 shasum -a 256 -c remote-command-0.5.0-SHA256SUMS
 ```
 
-也可在 GitHub Actions 中手动触发 **Verify** 工作流并勾选发布选项。测试全部通过后，工作流将 Gateway 镜像推送至 GHCR，并在 GitHub Release 上传独立 Compose 文件、Agent 安装包、部署包、离线镜像与 SHA-256 清单。
+也可在 GitHub Actions 中手动触发 **CI & Release / 自动化测试与发布** 工作流并勾选发布选项。测试全部通过后，工作流将 Gateway 镜像推送至 GHCR，并在 GitHub Release 上传独立 Compose 文件、Agent 安装包、部署包、离线镜像与 SHA-256 清单。
 
 ---
 
