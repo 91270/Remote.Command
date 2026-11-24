@@ -97,7 +97,8 @@ export class OAuth {
 <h1>Authorize Remote.Command</h1><p>Allow this ChatGPT connection to request tools on your paired devices. Changes and commands still require confirmation on the device.</p>
 <form method="post" action="/oauth/authorize">${inputs}<label>Owner key <input name="owner_key" type="password" required autocomplete="off"></label>
 <button>Authorize</button></form>`;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+      // A browser form POST from a no-referrer page would send Origin: null.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'strict-origin',
         'Content-Security-Policy': "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" }).end(html);
       return;
     }

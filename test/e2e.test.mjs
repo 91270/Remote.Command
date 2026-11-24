@@ -258,11 +258,21 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     const authParams = { client_id: clientId, redirect_uri: redirect, response_type: 'code', code_challenge: hash(verifier),
       code_challenge_method: 'S256', state: 'client-state', resource, scope: 'remote:use' };
     assert.equal((await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams({ ...authParams, redirect_uri: 'https://invalid.example' }))).status, 400);
-    const page = await (await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams(authParams))).text();
+    const authorizationPage = await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams(authParams));
+    assert.equal(authorizationPage.status, 200);
+    assert.equal(authorizationPage.headers.get('referrer-policy'), 'strict-origin',
+      'The consent page must preserve the Origin header on same-origin browser form submissions.');
+    const page = await authorizationPage.text();
     const base = { ...authParams, until: /name="until" value="([^"]+)"/.exec(page)[1], proof: /name="proof" value="([^"]+)"/.exec(page)[1] };
-    assert.equal((await form(origin, '/oauth/authorize', { ...base, owner_key: secret() })).status, 403);
-    const authorized = await form(origin, '/oauth/authorize', { ...base, owner_key: owner });
+    const opaqueOrigin = await form(origin, '/oauth/authorize', { ...base, owner_key: owner }, { Origin: 'null' });
+    assert.equal(opaqueOrigin.status, 403);
+    assert.deepEqual(await opaqueOrigin.json(), { error: 'Origin not allowed.' });
+    const wrongOwnerKey = await form(origin, '/oauth/authorize', { ...base, owner_key: secret() }, { Origin: origin });
+    assert.equal(wrongOwnerKey.status, 403);
+    assert.deepEqual(await wrongOwnerKey.json(), { error: 'access_denied' });
+    const authorized = await form(origin, '/oauth/authorize', { ...base, owner_key: owner }, { Origin: origin });
     assert.equal(authorized.status, 303);
+    assert.equal(authorized.headers.get('referrer-policy'), 'no-referrer');
     const callback = new URL(authorized.headers.get('location'));
     assert.equal(callback.searchParams.get('state'), 'client-state');
     assert.equal(callback.searchParams.get('iss'), origin);
