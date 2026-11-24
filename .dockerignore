@@ -12,5 +12,9 @@
 !deploy/
 !deploy/gateway/
 !deploy/gateway/**
+!agent.example.json
+!README.md
+!scripts/
+!scripts/package-client.mjs
 **/._*
 **/.DS_Store
