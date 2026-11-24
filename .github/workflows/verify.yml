@@ -1,50 +1,64 @@
-name: Verify
+name: "Remote.Command：自动化测试与发布"
 on:
   push:
+    paths-ignore:
+      - '.github/workflows/**'
   pull_request:
+    paths-ignore:
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the versioned Gateway image and release files
+        description: 发布带版本号的 Gateway 镜像和 Release 文件
         type: boolean
         default: false
 permissions:
   contents: read
 jobs:
   test:
+    name: 多平台 Agent 与 Gateway 自动化测试
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: 检出仓库源码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js 24
+        uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
-      - if: runner.os == 'Linux'
+      - name: 安装 Linux 测试依赖
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ripgrep procps
-      - if: runner.os == 'macOS'
+      - name: 安装 macOS 测试依赖
+        if: runner.os == 'macOS'
         run: brew install ripgrep
-      - if: runner.os == 'Windows'
+      - name: 安装 Windows 测试依赖
+        if: runner.os == 'Windows'
         run: choco install ripgrep -y --no-progress
-      - run: npm ci --ignore-scripts
-      - name: Test complete Agent and Gateway
+      - name: 安装 Node.js 依赖
+        run: npm ci --ignore-scripts
+      - name: 运行 Agent 与 Gateway 完整测试
         run: npm test
         env:
           RCM_TEST_LAUNCH: '1'
   compose:
+    name: Docker Compose 部署与 HTTPS 代理验证
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: 检出部署源码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js 24
+        uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Install host Nginx
+      - name: 安装宿主机 Nginx
         run: sudo apt-get update && sudo apt-get install -y nginx
-      - name: Verify the deployment image, bind mount and host Nginx HTTPS proxy
+      - name: 验证部署镜像、数据持久化和 Nginx HTTPS 反向代理
         run: |
           image=$(awk '$1 == "image:" {print $2}' compose.yaml)
           docker build -t "$image" .
@@ -102,19 +116,25 @@ jobs:
           test "$credentials_before" = "$(sudo sha256sum data/.oauth_client_secret data/.owner_key)"
           request --fail "$origin/readyz"
   package:
+    name: 生成发布安装包
     if: github.event_name == 'workflow_dispatch'
     needs: [test, compose]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: 检出发布源码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js 24
+        uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci --ignore-scripts
-      - run: npm run package:release -- --with-image
-      - uses: actions/upload-artifact@v4
+      - name: 安装发布所需的 Node.js 依赖
+        run: npm ci --ignore-scripts
+      - name: 生成包含 Gateway 镜像的发布包
+        run: npm run package:release -- --with-image
+      - name: 上传临时发布产物
+        uses: actions/upload-artifact@v4
         with:
           name: remote-command-release
           path: |
@@ -127,6 +147,7 @@ jobs:
           retention-days: 1
           compression-level: 9
   publish:
+    name: 发布 Gateway 镜像与 Release
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
     needs: package
     runs-on: ubuntu-latest
@@ -136,14 +157,16 @@ jobs:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出发布源码
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - name: 下载已校验的发布产物
+        uses: actions/download-artifact@v4
         with:
           name: remote-command-release
           path: releases
-      - name: Publish the Gateway image and release files
+      - name: 发布 Gateway 镜像并上传 Release 文件
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -171,25 +194,3 @@ jobs:
           docker tag "remote-command:$version" "$image"
           docker push "$image"
           gh release edit "$tag" --draft=false --repo "$GITHUB_REPOSITORY"
-
-  cleanup-artifacts:
-    name: Delete temporary release package
-    needs: [package, publish]
-    if: always() && needs.package.result != 'skipped'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-    steps:
-      - name: Delete this run's release package artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          artifact_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name == "remote-command-release") | .id')"
-          while IFS= read -r artifact_id; do
-            [[ -n "$artifact_id" ]] || continue
-            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null
-            echo "Deleted temporary artifact $artifact_id"
-          done <<< "$artifact_ids"
