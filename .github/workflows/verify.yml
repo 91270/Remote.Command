@@ -99,11 +99,16 @@ jobs:
           }
           request --fail "$origin/readyz"
           request --fail "$origin/manage" -o /dev/null
-          sudo jq -n --rawfile key data/.owner_key '{ownerKey: ($key | rtrimstr("\n"))}' \
+          admin_password=$(docker compose logs gateway | sed -n 's/.*username=admin password=\([A-Za-z0-9]\{8\}\).*/\1/p' | head -n 1)
+          test -n "$admin_password"
+          sudo sh -c 'ls -1 data/logs | grep -Eq "^[0-9]{8}-[0-9]{4}\.log$"'
+          jq -n --arg pwd "$admin_password" '{username: "admin", password: $pwd}' \
             | request --fail -o /dev/null -H "Origin: $origin" -H 'Content-Type: application/json' \
               --data-binary @- "$origin/manage/api/login"
           request --fail "$origin/.well-known/oauth-protected-resource/mcp" \
             | jq -e --arg resource "$origin/mcp" '.resource == $resource'
+          request --fail "$origin/.well-known/oauth-authorization-server" \
+            | jq -e --arg reg "$origin/oauth/register" '.registration_endpoint == $reg'
           node -e "process.stdout.write(' '.repeat(2 * 1024 * 1024))" > "$nginx_dir/sync-body"
           test "$(request -o /dev/null -w '%{http_code}' --data-binary "@$nginx_dir/sync-body" "$origin/device/sync")" = 401
 
