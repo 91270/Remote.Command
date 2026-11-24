@@ -168,3 +168,35 @@ test('OAuth discovery exposes registration_endpoint and DCR completes full autho
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('OAuth DCR allows loopback redirect_uris from Codex/CLI even when Gateway origin is HTTPS', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-oauth-loopback-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const oauth = new OAuth(store, { origin: 'https://mcp.example.com', ownerKey: secret() });
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'https://mcp.example.com');
+    if (await oauth.route(req, res, url)) return;
+    res.writeHead(404).end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const localBase = 'http://127.0.0.1:' + server.address().port;
+  try {
+    const res = await fetch(localBase + '/oauth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'Codex CLI',
+        redirect_uris: ['http://127.0.0.1:43210/callback', 'http://localhost:43211/callback']
+      })
+    });
+    assert.equal(res.status, 201);
+    const data = await res.json();
+    assert.equal(data.client_name, 'Codex CLI');
+    assert.deepEqual(data.redirect_uris, ['http://127.0.0.1:43210/callback', 'http://localhost:43211/callback']);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});

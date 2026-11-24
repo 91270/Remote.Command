@@ -8,8 +8,8 @@ services:
     stop_grace_period: 25s
     environment:
       PUBLIC_ORIGIN: https://mcp.example.com
-      OAUTH_CLIENT_ID: remote_command
-      OAUTH_REDIRECT_URIS: https://chatgpt.com/connector_platform_oauth_redirect
+      # OAuth 客户端与回调地址已通过 DCR (/oauth/register) 自动发现并注册，无需手动配置
+      # 如需限制额外回调域名，可按需配置 OAUTH_ALLOWED_REDIRECT_HOSTS: chatgpt.com,platform.openai.com
     volumes:
       - type: bind
         source: ./data

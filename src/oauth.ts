@@ -76,8 +76,7 @@ export class OAuth {
       return false;
     }
     if (url.hash || url.username || url.password) return false;
-    const isLoopback = this.cfg.origin.startsWith('http://127.0.0.1:') &&
-      url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+    const isLoopback = url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
     if (url.protocol !== 'https:' && !isLoopback) return false;
     if (skipHostCheck || isLoopback || this.allowedRedirectHosts.has('*')) return true;
     return this.allowedRedirectHosts.has(url.hostname);
