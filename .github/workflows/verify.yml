@@ -1,9 +1,13 @@
 name: "Remote.Command：自动化测试与发布"
 on:
   push:
+    branches:
+      - main
     paths-ignore:
       - '.github/workflows/**'
   pull_request:
+    branches:
+      - main
     paths-ignore:
       - '.github/workflows/**'
   workflow_dispatch:
