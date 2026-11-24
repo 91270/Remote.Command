@@ -4,51 +4,272 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Remote.Command · 调用审阅</title>
 <style>
-  :root { color-scheme: light dark; font: 14px/1.55 system-ui, sans-serif; }
-  body { margin: 0; }
-  section { border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 12px; padding: 16px; }
-  h2 { font-size: 16px; margin: 0 0 8px; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --subtle: #f2f2f7;
+    --border: rgba(0, 0, 0, 0.09);
+    --text: #1d1d1f;
+    --text-sec: #6e6e73;
+    --accent: #0071e3;
+    --accent-soft: rgba(0, 113, 227, 0.12);
+    --amber: #b25000;
+    --amber-soft: rgba(255, 159, 10, 0.16);
+    --red: #d70015;
+    --red-soft: rgba(255, 59, 48, 0.14);
+    --green: #248a3d;
+    --green-soft: rgba(52, 199, 89, 0.15);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0b0d;
+      --surface: #161619;
+      --subtle: #1e1e22;
+      --border: rgba(255, 255, 255, 0.12);
+      --text: #f5f5f7;
+      --text-sec: #98989d;
+      --accent: #0a84ff;
+      --accent-soft: rgba(10, 132, 255, 0.18);
+      --amber: #ffd60a;
+      --amber-soft: rgba(255, 214, 10, 0.16);
+      --red: #ff453a;
+      --red-soft: rgba(255, 69, 58, 0.16);
+      --green: #30d158;
+      --green-soft: rgba(48, 209, 88, 0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: transparent; color: var(--text); -webkit-font-smoothing: antialiased; }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 18px 20px;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  h2 { font-size: 16px; font-weight: 600; letter-spacing: -0.015em; margin: 0; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 600;
+    background: var(--subtle);
+    color: var(--text-sec);
+  }
+  .pill.accent { background: var(--accent-soft); color: var(--accent); }
+  .pill.warn { background: var(--amber-soft); color: var(--amber); }
+  .pill.danger { background: var(--red-soft); color: var(--red); }
+  .pill.ok { background: var(--green-soft); color: var(--green); }
   p { margin: 8px 0; }
-  pre { background: color-mix(in srgb, currentColor 8%, transparent); border-radius: 8px; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 230px; overflow: auto; }
-  button { font: inherit; padding: 6px 16px; border: 1px solid currentColor; border-radius: 8px; margin-right: 6px; cursor: pointer; }
-  #run { background: #17655b; color: white; border-color: #17655b; }
+  .summary { font-weight: 500; }
+  .status-text { font-size: 13px; color: var(--text-sec); }
+  .guidance {
+    margin: 10px 0;
+    padding: 10px 14px 10px 28px;
+    border-radius: 12px;
+    background: var(--subtle);
+    color: var(--text-sec);
+    font-size: 12.5px;
+  }
+  .guidance li { margin: 4px 0; }
+  .code-block { margin-top: 12px; }
+  .code-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 5px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-sec);
+  }
+  pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 220px;
+    overflow: auto;
+  }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  button {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.ghost { padding: 3px 10px; font-size: 11.5px; background: var(--subtle); }
 </style>
 <section>
-  <h2>审阅设备调用</h2>
-  <p id="summary">等待调用详情。</p>
-  <p id="message" role="status"></p>
-  <pre id="arguments" hidden></pre>
-  <button id="run" type="button" hidden>运行一次</button>
-  <button id="cancel" type="button" hidden>取消</button>
-  <pre id="result" hidden></pre>
+  <div class="header">
+    <h2>审阅设备调用</h2>
+    <div class="badges">
+      <span id="cap-badge" class="pill" hidden></span>
+      <span id="source-badge" class="pill" hidden></span>
+    </div>
+  </div>
+  <p id="summary" class="summary">等待调用详情。</p>
+  <p id="message" class="status-text" role="status"></p>
+  <ul id="guidance" class="guidance" hidden></ul>
+
+  <div id="manual-command-wrap" class="code-block" hidden>
+    <div class="code-head">
+      <span>本地终端手动执行命令</span>
+      <button id="copy-command" type="button" class="ghost">复制终端命令</button>
+    </div>
+    <pre id="manual-command"></pre>
+  </div>
+
+  <div id="arguments-wrap" class="code-block" hidden>
+    <div class="code-head">
+      <span>调用详情与参数</span>
+      <button id="copy-args" type="button" class="ghost">复制调用详情</button>
+    </div>
+    <pre id="arguments"></pre>
+  </div>
+
+  <div class="actions">
+    <button id="run" type="button" class="primary" hidden disabled>运行一次</button>
+    <button id="cancel" type="button" hidden disabled>取消</button>
+  </div>
+  <div id="result-wrap" class="code-block" hidden>
+    <div class="code-head"><span>执行结果</span></div>
+    <pre id="result"></pre>
+  </div>
 </section>
 <script>
   const byId = id => document.getElementById(id);
   const run = byId('run'), cancel = byId('cancel'), message = byId('message');
+  const capBadge = byId('cap-badge'), sourceBadge = byId('source-badge');
+  const guidanceList = byId('guidance');
+  const manualWrap = byId('manual-command-wrap'), manualPre = byId('manual-command');
+  const argsWrap = byId('arguments-wrap'), argsPre = byId('arguments');
+  const resultWrap = byId('result-wrap'), resultPre = byId('result');
   let hostOrigin = '*', initialized = false, canCall = false, decided = false, preview;
+
+  const capLabels = { read: '读取', write: '写入', exec: '执行命令' };
+  const sourceLabels = {
+    none: ['执行前预览', 'accent'],
+    host_safety: ['宿主安全拦截', 'warn'],
+    local_command_policy: ['本地命令策略', 'danger'],
+    local_path_policy: ['本地目录策略', 'danger'],
+    local_capability: ['本地权限未开启', 'danger']
+  };
+
   const send = data => window.parent.postMessage({ jsonrpc: '2.0', ...data }, hostOrigin);
   const notify = (method, params) => send({ method, params });
+
+  async function copyFromPre(preEl, okMessage) {
+    const text = preEl.textContent || '';
+    if (!text) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        message.textContent = okMessage;
+        return;
+      }
+    } catch { /* fallback to selection */ }
+    const range = document.createRange();
+    range.selectNodeContents(preEl);
+    const sel = window.getSelection();
+    if (sel) {
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    message.textContent = '剪贴板受限，已选中文本，请按 Cmd/Ctrl + C 复制。';
+  }
 
   function showPreview(value) {
     if (decided || value?.status !== 'awaiting_user' || !/^[a-z_]+$/.test(value.tool_name) ||
         !value.arguments || typeof value.arguments !== 'object' || Array.isArray(value.arguments)) return;
     preview = value;
     byId('summary').textContent = value.summary;
-    const args = byId('arguments');
-    args.textContent = value.tool_name + '\n' + JSON.stringify(value.arguments, null, 2);
-    args.hidden = false;
-    run.hidden = !canCall || value.after_client_error !== false;
-    cancel.hidden = !canCall || value.after_client_error !== false;
-    message.textContent = value.after_client_error
-      ? '宿主已拦截这次调用。' + (value.likely_reason || '')
-      : canCall ? '在当前设备权限下运行。敏感操作仍需设备端确认。' : '当前宿主可以查看这次调用。';
+
+    const cap = value.capability;
+    if (cap && capLabels[cap]) {
+      capBadge.textContent = '权限：' + capLabels[cap];
+      capBadge.className = 'pill' + (cap === 'read' ? ' ok' : ' warn');
+      capBadge.hidden = false;
+    }
+
+    const srcKey = value.block_source && sourceLabels[value.block_source]
+      ? value.block_source
+      : (value.after_client_error ? 'host_safety' : 'none');
+    const [srcText, srcClass] = sourceLabels[srcKey];
+    sourceBadge.textContent = srcText;
+    sourceBadge.className = 'pill ' + srcClass;
+    sourceBadge.hidden = false;
+
+    argsPre.textContent = value.tool_name + '\n' + JSON.stringify(value.arguments, null, 2);
+    argsWrap.hidden = false;
+
+    if (typeof value.manual_command === 'string' && value.manual_command) {
+      manualPre.textContent = value.manual_command;
+      manualWrap.hidden = false;
+    } else {
+      manualWrap.hidden = true;
+    }
+
+    guidanceList.replaceChildren();
+    if (Array.isArray(value.guidance) && value.guidance.length > 0) {
+      for (const tip of value.guidance) {
+        const li = document.createElement('li');
+        li.textContent = String(tip);
+        guidanceList.appendChild(li);
+      }
+      guidanceList.hidden = false;
+    } else {
+      guidanceList.hidden = true;
+    }
+
+    const allowAction = canCall && value.after_client_error === false;
+    run.hidden = !allowAction;
+    run.disabled = !allowAction;
+    cancel.hidden = !allowAction;
+    cancel.disabled = !allowAction;
+
+    if (value.after_client_error) {
+      const prefix = srcKey === 'host_safety' ? '宿主已拦截这次调用。' : '本地策略已拒绝这次调用。';
+      message.textContent = prefix + (value.likely_reason || '');
+    } else {
+      message.textContent = canCall ? '在当前设备权限下运行。敏感操作仍需设备端确认。' : '当前宿主可以查看这次调用。';
+    }
   }
 
   function finish() {
     decided = true;
     run.hidden = true;
+    run.disabled = true;
     cancel.hidden = true;
+    cancel.disabled = true;
   }
+
+  byId('copy-command').addEventListener('click', () => copyFromPre(manualPre, '已复制终端命令，可直接在目标设备终端运行。'));
+  byId('copy-args').addEventListener('click', () => copyFromPre(argsPre, '已复制完整调用详情。'));
 
   run.addEventListener('click', () => {
     if (decided || !canCall || preview?.after_client_error !== false) return;
@@ -60,6 +281,7 @@
     finish();
     message.textContent = '已取消这次请求。';
   });
+
   window.addEventListener('message', event => {
     if (event.source !== window.parent || event.data?.jsonrpc !== '2.0') return;
     if (hostOrigin !== '*' && event.origin !== hostOrigin) return;
@@ -75,15 +297,26 @@
     } else if ((data.method === 'ui/resource-teardown' || data.method === 'ping') && 'id' in data) {
       send({ id: data.id, result: {} });
     } else if (data.id === 2 && decided) {
-      const output = byId('result');
-      output.textContent = data.error?.message || JSON.stringify(data.result, null, 2);
-      output.hidden = false;
-      message.textContent = data.error || data.result?.isError ? '调用未完成。' : '宿主已返回结果。';
+      const text = data.error?.message || JSON.stringify(data.result, null, 2);
+      resultPre.textContent = text;
+      resultWrap.hidden = false;
+      if (data.error || data.result?.isError) {
+        if (/command not allowed/i.test(text)) {
+          message.textContent = '设备本地 blockedCommands 策略拒绝了此命令（并非 OpenAI 拦截）。';
+        } else if (/path not allowed|outside.*workspace/i.test(text)) {
+          message.textContent = '目标路径超出设备本地工作区或 allowedDirectories 边界（并非 OpenAI 拦截）。';
+        } else {
+          message.textContent = '调用未完成。';
+        }
+      } else {
+        message.textContent = '宿主已返回结果。';
+      }
     }
   });
+
   if (window.parent !== window) {
     send({ id: 1, method: 'ui/initialize', params: {
-      appInfo: { name: 'Remote.Command', version: '0.4.1' }, appCapabilities: {}, protocolVersion: '2026-01-26'
+      appInfo: { name: 'Remote.Command', version: '__RCM_VERSION__' }, appCapabilities: {}, protocolVersion: '2026-01-26'
     } });
     new ResizeObserver(() => {
       if (initialized) notify('ui/notifications/size-changed', { height: document.documentElement.scrollHeight });

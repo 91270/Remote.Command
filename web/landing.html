@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Remote.Command · 让 ChatGPT 安全直连你的电脑</title>
+  <link rel="stylesheet" href="/assets/landing.css">
+  <script src="/assets/landing.js" defer></script>
+</head>
+<body>
+  <header class="site-nav">
+    <div class="nav-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">RC</span>
+        <span class="brand-name">Remote.Command</span>
+      </a>
+      <nav class="nav-links" aria-label="主导航">
+        <a href="#features">功能特性</a>
+        <a href="#workflow">快速上手</a>
+        <a href="#pricing">套餐方案</a>
+        <a href="#security">安全隐私</a>
+      </nav>
+      <div class="nav-actions">
+        <button id="theme-toggle" class="icon-pill" type="button" aria-label="切换浅色或深色主题" title="切换外观主题">◐</button>
+        <a id="nav-cta" class="btn-primary btn-sm" href="/manage">进入控制台</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-inner">
+        <span class="eyebrow">Remote MCP · 零内网穿透 · 本地人工审批</span>
+        <h1>让 ChatGPT 安全直连<br>你的每一台电脑。</h1>
+        <p class="hero-sub">无需公网 IP，无需配置 SSH。在任意设备上运行一行命令，即可让 ChatGPT 读取文件、检索代码、运行终端命令并保持持久会话——所有敏感操作均在你眼前确认后执行。</p>
+        <div class="hero-cta">
+          <a id="hero-primary-cta" class="btn-primary btn-lg" href="/auth/google/start?return_to=%2Fmanage">使用 Google 账号开始</a>
+          <a class="btn-secondary btn-lg" href="#workflow">查看 3 步接入</a>
+        </div>
+
+        <div class="hero-showcase" aria-label="产品连接架构预览">
+          <div class="showcase-bar">
+            <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+            <span class="showcase-title">Remote.Command · 实时加密隧道</span>
+          </div>
+          <div class="showcase-body">
+            <div class="flow-node">
+              <span class="node-badge">AI 客户端</span>
+              <strong>ChatGPT</strong>
+              <small>HTTPS + OAuth 2.0 DCR</small>
+            </div>
+            <div class="flow-arrow" aria-hidden="true"></div>
+            <div class="flow-node accent">
+              <span class="node-badge">中继网关</span>
+              <strong>Remote Gateway</strong>
+              <small>多租户隔离 · 审计 · 配额</small>
+            </div>
+            <div class="flow-arrow" aria-hidden="true"></div>
+            <div class="flow-node">
+              <span class="node-badge online">Online</span>
+              <strong>Mac / Windows / Linux</strong>
+              <small>25+ 原生工具 · 本机审批</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="section">
+      <div class="container">
+        <div class="section-head">
+          <h2>为真实工作流而造。</h2>
+          <p>融合 Desktop Commander 完整工具生态与严格的本地安全边界，开箱即用。</p>
+        </div>
+        <div class="bento-grid">
+          <article class="bento-card span-2">
+            <span class="bento-tag">零内网穿透</span>
+            <h3>主动 HTTPS 外连，无需开放任何入站端口</h3>
+            <p>目标电脑只需能访问公网 HTTPS 443 端口即可稳定上线，支持公司内网、家庭宽带、Mac mini 与云服务器，断网自动重连。</p>
+          </article>
+          <article class="bento-card">
+            <span class="bento-tag green">双重安全边界</span>
+            <h3>敏感操作本地人工确认</h3>
+            <p>默认只读启动；写文件、改配置、执行命令与终止进程均挂起等待本机审批，绝不静默执行。</p>
+          </article>
+          <article class="bento-card">
+            <span class="bento-tag">完整工具集</span>
+            <h3>25+ 文件、终端、搜索与 PDF 工具</h3>
+            <p>支持文本、图片、Excel、DOCX、PDF 读写、精准代码块编辑、高速 ripgrep 搜索与持久终端会话。</p>
+          </article>
+          <article class="bento-card span-2">
+            <span class="bento-tag">多设备协同</span>
+            <h3>一个账号管理你的全部电脑与服务器</h3>
+            <p>随时在 ChatGPT 中切换工作设备，在控制台直观查看在线状态、最近调用、用量统计与一键撤销权限。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="workflow" class="section section-alt">
+      <div class="container">
+        <div class="section-head">
+          <h2>三步完成接入。</h2>
+          <p>无需手动填写 Client ID 或 Secret，全程自动化完成。</p>
+        </div>
+        <div class="steps-grid">
+          <article class="step-card">
+            <span class="step-num">01</span>
+            <h3>使用 Google 登录</h3>
+            <p>通过 Google 账号一键登录控制台，每个用户拥有独立隔离的设备与审计空间。</p>
+          </article>
+          <article class="step-card">
+            <span class="step-num">02</span>
+            <h3>运行一行安装命令</h3>
+            <p>在 macOS、Windows 或 Linux 终端运行控制台提供的专属命令，自动配置运行环境并核对短码完成配对。</p>
+          </article>
+          <article class="step-card">
+            <span class="step-num">03</span>
+            <h3>在 ChatGPT 中连接</h3>
+            <p>在 ChatGPT 添加本服务的 MCP Server URL，选择 OAuth 自动注册并一键确认，立即开始对话操作设备。</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing" class="section">
+      <div class="container">
+        <div class="section-head">
+          <h2>清晰透明的套餐方案。</h2>
+          <p>按你的使用强度自由选择，随时可升级。</p>
+        </div>
+        <div class="pricing-grid">
+          <article class="price-card">
+            <div class="price-head">
+              <h3>Free</h3>
+              <p class="price-num"><span>$0</span> / 月</p>
+            </div>
+            <ul class="price-list">
+              <li>每月 <strong>10,000 次</strong>工具调用（每月 1 日重置）</li>
+              <li>支持 ChatGPT 及标准 Remote MCP 客户端</li>
+              <li>多设备管理、工作区隔离与本地人工审批</li>
+              <li>用量统计面板与 80% 额度提醒</li>
+            </ul>
+            <a class="btn-secondary btn-block" href="/manage">免费开始使用</a>
+          </article>
+          <article class="price-card featured">
+            <div class="price-head">
+              <div class="price-title-row">
+                <h3>Pro</h3>
+                <span class="badge-pro">推荐</span>
+              </div>
+              <p class="price-num"><span>Unlimited</span></p>
+            </div>
+            <ul class="price-list">
+              <li><strong>无限次</strong>月度工具调用，重度任务无中断</li>
+              <li>支持全部核心功能与多台常驻设备</li>
+              <li>支持控制台兑换码即时激活与到期平滑管理</li>
+              <li>优先体验新平台连接器与高级运维特性</li>
+            </ul>
+            <a class="btn-primary btn-block" href="/manage">进入控制台升级</a>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="security" class="section section-alt">
+      <div class="container">
+        <div class="security-banner">
+          <div>
+            <h2>你的电脑，始终由你掌控。</h2>
+            <p>所有文件读写严格限定在本地指定的工作区目录内；写操作与终端命令默认挂起等待本机确认；任何时候都可在控制台一键撤销设备或 OAuth 授权。</p>
+          </div>
+          <a class="btn-primary btn-lg" href="/manage">立即进入控制台</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <span>Remote.Command · Self-Hosted Remote MCP</span>
+      <div class="footer-links">
+        <a href="/manage">控制台</a>
+        <a href="/healthz">服务状态</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

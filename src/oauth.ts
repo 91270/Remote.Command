@@ -1,8 +1,9 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { body, json, bearer, readJson, HttpError } from './http.js';
 import { hash, match, secret } from './protocol.js';
-import type { Store } from './store.js';
+import { ipDigest, type RateLimiter } from './rate-limit.js';
+import type { Store, UserRecord } from './store.js';
 
 const scope = 'remote:use';
 const accessMs = 3600000;
@@ -18,7 +19,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization'
 };
 
-type Grant = { clientId?: string; redirect: string; challenge: string };
+type Grant = { clientId?: string; redirect: string; challenge: string; userId?: string };
 type ResolvedClient = {
   clientId: string;
   clientName: string | null;
@@ -34,14 +35,18 @@ export type OAuthConfig = {
   ownerKey: string;
   redirects?: Set<string>;
   allowedRedirectHosts?: Set<string>;
+  googleEnabled?: boolean;
+  rateLimiter?: RateLimiter;
 };
 
 export class OAuth {
   readonly resource: string;
   private readonly allowedRedirectHosts: Set<string>;
+  private readonly sessionCookieName: string;
 
   constructor(private readonly store: Store, private readonly cfg: OAuthConfig) {
     this.resource = cfg.origin + '/mcp';
+    this.sessionCookieName = cfg.origin.startsWith('https:') ? '__Host-rcm_dashboard' : 'rcm_dashboard';
     if (!opaque.test(cfg.ownerKey)) {
       throw new Error('Invalid OAuth configuration. Owner key must be a 43-character credential.');
     }
@@ -66,6 +71,19 @@ export class OAuth {
         }
       }
     }
+  }
+
+  private sessionUser(req: IncomingMessage): UserRecord | null {
+    const entries = (req.headers.cookie ?? '').split(';').map(value => value.trim().split('='));
+    const matching = entries.filter(([name]) => name === this.sessionCookieName);
+    if (matching.length !== 1) return null;
+    const token = matching[0]?.[1];
+    if (!token || !opaque.test(token)) return null;
+    const record = this.store.getAuth(token, 'dashboard');
+    if (!record || typeof record.data.userId !== 'string') return null;
+    const user = this.store.findUserById(record.data.userId);
+    if (!user || user.status !== 'active') return null;
+    return user;
   }
 
   private isValidRedirectUri(raw: string, skipHostCheck = false): boolean {
@@ -116,32 +134,49 @@ export class OAuth {
     });
   }
 
-  authenticated(req: IncomingMessage) {
+  authenticateAccess(req: IncomingMessage): { token: string; userId?: string } | null {
     const token = bearer(req);
-    return !!token && !!this.store.db.prepare("SELECT 1 FROM auth WHERE digest=? AND kind='access' AND expires>?")
-      .get(hash(token), Date.now());
+    if (!token) return null;
+    const record = this.store.getAuth(token, 'access');
+    if (!record) return null;
+    const userId = typeof record.data.userId === 'string' ? record.data.userId : undefined;
+    if (userId) {
+      const user = this.store.findUserById(userId);
+      if (!user || user.status !== 'active') return null;
+    }
+    const clientId = typeof record.data.clientId === 'string' && record.data.clientId ? record.data.clientId : undefined;
+    if (clientId) {
+      this.store.recordOAuthActivity(userId, clientId, record.digest);
+    }
+    return { token, userId };
+  }
+
+  authenticated(req: IncomingMessage) {
+    return !!this.authenticateAccess(req);
   }
 
   sign(data: string) {
     return createHmac('sha256', this.cfg.ownerKey).update(data).digest('base64url');
   }
 
-  save(kind: string, ttl: number, data: object) {
+  save(kind: string, ttl: number, data: Record<string, unknown>) {
     const token = secret();
-    this.store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(token), kind, Date.now() + ttl, JSON.stringify(data));
+    this.store.putAuth(token, kind, ttl, data);
     return token;
   }
 
   find(token: string, kind: string) {
-    return this.store.db.prepare('SELECT data FROM auth WHERE digest=? AND kind=? AND expires>?').get(hash(token), kind, Date.now());
+    return this.store.getAuth(token, kind);
   }
 
-  tokens() {
+  tokens(context: Record<string, unknown> = {}) {
+    const sessionId = typeof context.sessionId === 'string' && context.sessionId ? context.sessionId : randomUUID();
+    const payload = { ...context, sessionId };
     return {
-      access_token: this.save('access', accessMs, {}),
+      access_token: this.save('access', accessMs, payload),
       token_type: 'Bearer',
       expires_in: accessMs / 1000,
-      refresh_token: this.save('refresh', refreshMs, {}),
+      refresh_token: this.save('refresh', refreshMs, payload),
       scope
     };
   }
@@ -182,7 +217,7 @@ export class OAuth {
     }
     if (pathname === '/oauth/authorize' && (req.method === 'GET' || req.method === 'POST')) {
       const params = req.method === 'GET' ? url.searchParams : new URLSearchParams(await body(req, 'application/x-www-form-urlencoded', 16000));
-      this.authorize(params, res, req.method === 'POST');
+      this.authorize(req, params, res, req.method === 'POST', url);
       return true;
     }
     if (pathname === '/oauth/token' && req.method === 'POST') {
@@ -193,6 +228,22 @@ export class OAuth {
   }
 
   private async register(req: IncomingMessage, res: ServerResponse) {
+    if (this.cfg.rateLimiter) {
+      const limiter = this.cfg.rateLimiter;
+      const ip = limiter.clientIp(req);
+      const status = limiter.consume('oauth_register', ip);
+      if (!status.allowed) {
+        if (limiter.shouldAudit('oauth_register', ip)) {
+          this.store.audit('rate_limited', { bucket: 'oauth_register', route: '/oauth/register', ip: ipDigest(ip) });
+        }
+        return json(
+          res,
+          429,
+          { error: 'too_many_requests', error_description: 'Too many client registration requests.' },
+          { ...corsHeaders, 'Retry-After': String(status.retryAfterSec) }
+        );
+      }
+    }
     let raw: unknown;
     try {
       raw = await readJson(req, 16384);
@@ -251,7 +302,7 @@ export class OAuth {
     }, corsHeaders);
   }
 
-  authorize(p: URLSearchParams, res: ServerResponse, post: boolean) {
+  authorize(req: IncomingMessage, p: URLSearchParams, res: ServerResponse, post: boolean, url?: URL) {
     const fields = ['client_id', 'redirect_uri', 'response_type', 'code_challenge', 'code_challenge_method', 'state', 'resource', 'scope'];
     const invalid = () => json(res, 400, { error: 'invalid_request' });
     if ([...new Set(p.keys())].some(k => p.getAll(k).length > 1)) return invalid();
@@ -263,6 +314,8 @@ export class OAuth {
         (p.get('state')?.length ?? 0) > 1024 || p.get('resource') !== this.resource ||
         (p.has('scope') && p.get('scope') !== scope)) return invalid();
     const fieldsData = fields.filter(k => p.has(k)).map(k => [k, p.get(k)!] as const);
+    const activeUser = this.sessionUser(req);
+
     if (!post) {
       const until = String(Date.now() + 300000);
       const proof = this.sign(JSON.stringify([fieldsData, until]));
@@ -271,12 +324,47 @@ export class OAuth {
       const clientLabel = escapeHtml(client.clientName || client.clientId);
       const rawRedirectOrigin = new URL(redirectUri).origin;
       const redirectOrigin = escapeHtml(rawRedirectOrigin);
+      const returnPath = '/oauth/authorize' + (url?.search ?? ('?' + p.toString()));
+      const googleHref = '/auth/google/start?return_to=' + encodeURIComponent(returnPath);
+
+      let cardBody: string;
+      if (activeUser) {
+        const accountLabel = escapeHtml(activeUser.email || activeUser.username || activeUser.id);
+        cardBody = `<form class="login-card" method="post" action="/oauth/authorize">
+        ${inputs}
+        <input type="hidden" name="session_auth" value="1">
+        <h2>授权连接</h2>
+        <p>客户端 <strong>${clientLabel}</strong> 请求以账号 <strong>${accountLabel}</strong> 访问你的已配对设备，授权后将回调至 <code>${redirectOrigin}</code>。</p>
+        <button type="submit" class="primary">确认授权</button>
+      </form>`;
+      } else {
+        const googleBlock = this.cfg.googleEnabled
+          ? `<a href="${escapeHtml(googleHref)}" class="primary button-link">使用 Google 账号继续</a>`
+          : '';
+        const passwordBlock = !this.cfg.googleEnabled || this.store.hasPasswordAdmin()
+          ? `<form method="post" action="/oauth/authorize">
+        ${inputs}
+        <label for="auth-username">管理员账号</label>
+        <input id="auth-username" name="username" type="text" value="admin" required autocomplete="username">
+        <label for="auth-password">密码</label>
+        <input id="auth-password" name="password" type="password" required autocomplete="current-password">
+        <button type="submit" class="${this.cfg.googleEnabled ? 'secondary' : 'primary'}">确认授权</button>
+      </form>`
+          : '';
+        cardBody = `<div class="login-card">
+        <h2>授权连接</h2>
+        <p>客户端 <strong>${clientLabel}</strong> 请求访问权限，授权后将回调至 <code>${redirectOrigin}</code>。</p>
+        ${googleBlock}
+        ${passwordBlock}
+      </div>`;
+      }
+
       const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light dark">
   <title>Remote.Command · 授权连接</title>
   <link rel="stylesheet" href="/manage/assets/dashboard.css">
 </head>
@@ -291,16 +379,7 @@ export class OAuth {
       </div>
     </div>
     <div class="login-main">
-      <form class="login-card" method="post" action="/oauth/authorize">
-        ${inputs}
-        <h2>授权连接</h2>
-        <p>客户端 <strong>${clientLabel}</strong> 请求访问权限，授权后将回调至 <code>${redirectOrigin}</code>。</p>
-        <label for="auth-username">管理员账号</label>
-        <input id="auth-username" name="username" type="text" value="admin" required autocomplete="username">
-        <label for="auth-password">密码</label>
-        <input id="auth-password" name="password" type="password" required autocomplete="current-password">
-        <button type="submit" class="primary">确认授权</button>
-      </form>
+      ${cardBody}
     </div>
   </section>
 </body>
@@ -310,23 +389,65 @@ export class OAuth {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'strict-origin',
-        'Content-Security-Policy': `default-src 'none'; style-src 'self'; form-action 'self' ${rawRedirectOrigin}; frame-ancestors 'none'; base-uri 'none'`
+        'Content-Security-Policy': `default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self' ${rawRedirectOrigin}; frame-ancestors 'none'; base-uri 'none'`
       }).end(html);
       return;
     }
+
     const until = p.get('until') ?? '', proof = p.get('proof') ?? '';
-    const username = (p.get('username') ?? '').trim(), password = p.get('password') ?? '';
     if (!/^\d{13}$/.test(until) || Number(until) <= Date.now() || !match(proof, this.sign(JSON.stringify([fieldsData, until])))) {
       return json(res, 403, { error: 'access_denied' });
     }
-    const user = this.store.authenticateUser(username, password);
-    if (!user || user.role !== 'admin') {
-      return json(res, 403, { error: 'access_denied' });
+
+    let authorizedUser: UserRecord | null = null;
+    if (p.get('session_auth') === '1') {
+      authorizedUser = activeUser;
+      if (!authorizedUser || authorizedUser.status !== 'active') {
+        return json(res, 403, { error: 'access_denied' });
+      }
+    } else {
+      const username = (p.get('username') ?? '').trim(), password = p.get('password') ?? '';
+      const limiter = this.cfg.rateLimiter;
+      const ip = limiter ? limiter.clientIp(req) : '';
+      const userKey = limiter ? `${ip}:${username.toLowerCase()}` : '';
+      if (limiter) {
+        const ipStatus = limiter.check('login_failure', ip);
+        const userStatus = limiter.check('login_failure', userKey);
+        if (!ipStatus.allowed || !userStatus.allowed) {
+          const retryAfterSec = Math.max(ipStatus.retryAfterSec, userStatus.retryAfterSec);
+          if (limiter.shouldAudit('login_failure', ip)) {
+            this.store.audit('rate_limited', { bucket: 'login_failure', route: '/oauth/authorize', ip: ipDigest(ip) });
+          }
+          return json(res, 429, { error: 'too_many_requests' }, { 'Retry-After': String(retryAfterSec) });
+        }
+      }
+      authorizedUser = this.store.authenticateUser(username, password);
+      if (!authorizedUser || authorizedUser.status !== 'active') {
+        if (limiter) {
+          limiter.consume('login_failure', ip);
+          limiter.consume('login_failure', userKey);
+        }
+        return json(res, 403, { error: 'access_denied' });
+      }
+      if (limiter) {
+        limiter.reset('login_failure', ip);
+        limiter.reset('login_failure', userKey);
+      }
     }
+
     const redirect = new URL(redirectUri);
     const code = this.store.tx(() => {
-      const code = this.save('code', 120000, { clientId: client.clientId, redirect: redirectUri, challenge: p.get('code_challenge') });
-      this.store.audit('oauth_authorized', { clientId: client.clientId, username: user.username });
+      const code = this.save('code', 120000, {
+        clientId: client.clientId,
+        redirect: redirectUri,
+        challenge: p.get('code_challenge'),
+        userId: authorizedUser!.id
+      });
+      this.store.touchOAuthClient(client.clientId);
+      this.store.audit('oauth_authorized', {
+        clientId: client.clientId,
+        username: authorizedUser!.email ?? authorizedUser!.username
+      }, authorizedUser!.id);
       return code;
     });
     redirect.searchParams.set('code', code);
@@ -360,19 +481,57 @@ export class OAuth {
     if (grant !== 'authorization_code' && grant !== 'refresh_token') return json(res, 400, { error: 'unsupported_grant_type' });
     const token = p.get(grant === 'authorization_code' ? 'code' : 'refresh_token') ?? '';
     const result = this.store.tx(() => {
-      const saved = opaque.test(token) && this.find(token, grant === 'authorization_code' ? 'code' : 'refresh');
+      const now = Date.now();
+      const saved = opaque.test(token) ? this.find(token, grant === 'authorization_code' ? 'code' : 'refresh') : undefined;
       if (!saved) return;
+      const savedData = saved.data;
+      let userId: string | undefined = typeof savedData.userId === 'string' ? savedData.userId : undefined;
+      let redirectOrigin: string | undefined;
       if (grant === 'authorization_code') {
-        const data = JSON.parse(String(saved.data)) as Grant;
+        const data = savedData as unknown as Grant;
         const verifier = p.get('code_verifier') ?? '';
         if ((data.clientId && data.clientId !== client.clientId) ||
             p.get('redirect_uri') !== data.redirect ||
             !verifierPattern.test(verifier) ||
             !match(hash(verifier), data.challenge)) return;
-      } else if (p.has('scope') && p.get('scope') !== scope) return;
-      this.store.db.prepare('DELETE FROM auth WHERE digest=?').run(hash(token));
-      this.store.audit(grant === 'authorization_code' ? 'oauth_token_issued' : 'oauth_token_refreshed', { clientId: client.clientId });
-      return this.tokens();
+        userId = data.userId;
+        try { redirectOrigin = new URL(data.redirect).origin; } catch { /* ignore invalid redirect */ }
+      } else {
+        if (typeof savedData.clientId === 'string' && savedData.clientId !== client.clientId) return;
+        if (p.has('scope') && p.get('scope') !== scope) return;
+        redirectOrigin = typeof savedData.redirectOrigin === 'string' ? savedData.redirectOrigin : undefined;
+      }
+
+      if (userId) {
+        const user = this.store.findUserById(userId);
+        if (!user || user.status !== 'active') return;
+      }
+
+      this.store.deleteAuthByDigest(saved.digest);
+      this.store.touchOAuthClient(client.clientId, now);
+      this.store.audit(grant === 'authorization_code' ? 'oauth_token_issued' : 'oauth_token_refreshed', { clientId: client.clientId }, userId);
+      const sessionId = grant === 'refresh_token' && typeof savedData.sessionId === 'string' ? savedData.sessionId : undefined;
+      const candidateDevice = grant === 'refresh_token' && typeof savedData.selectedDevice === 'string' ? savedData.selectedDevice : undefined;
+      const selectedDevice = candidateDevice && this.store.devices(userId).some(d => d.id === candidateDevice && !d.revoked)
+        ? candidateDevice
+        : undefined;
+      const authorizedAt = grant === 'refresh_token' && typeof savedData.authorizedAt === 'number'
+        ? savedData.authorizedAt
+        : now;
+      const clientName = client.clientName ?? (typeof savedData.clientName === 'string' ? savedData.clientName : undefined);
+      const tokenContext: Record<string, unknown> = {
+        clientId: client.clientId,
+        authorizedAt,
+        lastActiveAt: now,
+        ...(clientName ? { clientName } : {}),
+        ...(redirectOrigin ? { redirectOrigin } : {}),
+        ...(userId ? { userId } : {}),
+        ...(sessionId ? { sessionId } : {}),
+        ...(selectedDevice ? { selectedDevice } : {})
+      };
+      const issued = this.tokens(tokenContext);
+      this.store.recordOAuthActivity(userId, client.clientId, undefined, now);
+      return issued;
     });
     return result ? json(res, 200, result, { Pragma: 'no-cache' }) : json(res, 400, { error: 'invalid_grant' });
   }

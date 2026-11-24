@@ -108,7 +108,8 @@ test('Gateway initializes private credentials once and reuses them after restart
     const ownerFile = join(state, '.owner_key');
     const env = { ...process.env, STATE_DB: join(state, 'gateway.sqlite'), PUBLIC_ORIGIN: origin,
       ALLOW_INSECURE_LOOPBACK: '1', PORT: String(p), BIND_HOST: '127.0.0.1', OAUTH_CLIENT_ID: 'fixture_client',
-      OAUTH_REDIRECT_URIS: 'http://127.0.0.1:9990/callback' };
+      OAUTH_REDIRECT_URIS: 'http://127.0.0.1:9990/callback',
+      GOOGLE_CLIENT_ID: 'fixture-google-client', GOOGLE_CLIENT_SECRET: 'fixture-google-secret' };
     for (const name of ['OAUTH_CLIENT_SECRET', 'OAUTH_CLIENT_SECRET_FILE', 'OWNER_KEY', 'OWNER_KEY_FILE']) delete env[name];
 
     const boot = async () => {
@@ -127,22 +128,20 @@ test('Gateway initializes private credentials once and reuses them after restart
       assert.equal((await stat(ownerFile)).mode & 0o777, 0o600);
     }
     assert.ok(!gateway.output().includes(clientSecret) && !gateway.output().includes(ownerKey));
-    const adminMatch = /username=admin password=([A-Za-z0-9]{8})/.exec(gateway.output());
-    assert.ok(adminMatch, gateway.output());
-    const adminPassword = adminMatch[1];
+    assert.match(gateway.output(), /awaiting first admin sign-in via Google OAuth/);
     const logDir = join(state, 'logs');
     const logFiles = (await readdir(logDir)).filter(name => /^\d{8}-\d{4}\.log$/.test(name));
     assert.ok(logFiles.length >= 1);
     const logContent = await readFile(join(logDir, logFiles.at(-1)), 'utf8');
-    assert.ok(logContent.includes(`username=admin password=${adminPassword}`));
+    assert.match(logContent, /awaiting first admin sign-in via Google OAuth/);
 
     await stop(gateway);
     await boot();
     assert.ok((await readFile(clientFile, 'utf8')).trim() === clientSecret);
     assert.ok((await readFile(ownerFile, 'utf8')).trim() === ownerKey);
-    assert.ok(!/password=/.test(gateway.output()));
-    const login = await post(origin + '/manage/api/login', { username: 'admin', password: adminPassword }, { Origin: origin });
-    assert.equal(login.status, 200);
+    const authCfg = await (await fetch(origin + '/manage/api/auth-config')).json();
+    assert.equal(authCfg.googleEnabled, true);
+    assert.equal(authCfg.initialized, false);
   } finally {
     await stop(gateway);
     await rm(temp, { recursive: true, force: true });
@@ -205,7 +204,8 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
   const clientId = 'fixture_client', clientSecret = secret(), owner = secret();
   const redirect = (proxy ? 'https:' : 'http:') + '//127.0.0.1:9990/callback';
   const env = { ...process.env, STATE_DB: db, PUBLIC_ORIGIN: origin, ALLOW_INSECURE_LOOPBACK: '1', PORT: String(p),
-    BIND_HOST: '127.0.0.1', OAUTH_CLIENT_ID: clientId, OAUTH_CLIENT_SECRET: clientSecret, OWNER_KEY: owner, OAUTH_REDIRECT_URIS: redirect };
+    BIND_HOST: '127.0.0.1', OAUTH_CLIENT_ID: clientId, OAUTH_CLIENT_SECRET: clientSecret, OWNER_KEY: owner, OAUTH_REDIRECT_URIS: redirect,
+    GOOGLE_CLIENT_ID: 'fixture-google-client', GOOGLE_CLIENT_SECRET: 'fixture-google-secret' };
   const oauthSecretFile = join(temp, 'oauth-secret');
   const ownerKeyFile = join(temp, 'owner-key');
   const fileEnv = { ...env, OAUTH_CLIENT_SECRET: secret(), OWNER_KEY: secret(),
@@ -256,9 +256,11 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     await writeFile(ownerKeyFile, owner + '\n');
     await writeFile(config, JSON.stringify({ gateway: agentOrigin, workspace: ws, stateDir, allowInsecureLoopback: !proxy,
       capabilities: ['read', 'write', 'exec'] }));
+    const seedStore = new Store(db);
+    const adminPassword = seedStore.ensureInitialAdmin().password;
+    seedStore.db.close();
     await startGateway();
-    const adminPassword = /username=admin password=([A-Za-z0-9]{8})/.exec(gateway.output())?.[1];
-    assert.ok(adminPassword, gateway.output());
+    assert.ok(adminPassword);
     assert.equal((await fetch(resource)).status, 401);
     assert.equal((await fetch(resource, { headers: { Origin: 'https://invalid.example' } })).status, 403);
     const meta = await (await fetch(origin + '/.well-known/oauth-protected-resource/mcp')).json();
@@ -312,13 +314,19 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     const reviewTool = list.tools.find(tool => tool.name === 'review_device_call');
     assert.equal(reviewTool._meta.ui.resourceUri, 'ui://remote-command/call-review.html');
     const reviewUI = await client.readResource({ uri: reviewTool._meta.ui.resourceUri });
+    const pkgVersion = JSON.parse(await readFile('package.json', 'utf8')).version;
     assert.match(reviewUI.contents[0].text, /ui\/notifications\/tool-result/);
+    assert.equal(reviewUI.contents[0].text.includes(JSON.stringify(pkgVersion)), true);
+    assert.equal(reviewUI.contents[0].text.includes('0.4.1'), false);
     const input = { tool_name: 'write_file', arguments: { path: 'preview-only.txt', content: 'never queued' }, summary: 'Inspect the proposed write.' };
     const proposed = await client.callTool({ name: 'review_device_call', arguments: input });
     assert.deepEqual(proposed.structuredContent.arguments, input.arguments);
     assert.equal(proposed.structuredContent.after_client_error, false);
+    assert.equal(proposed.structuredContent.block_source, 'none');
     const blocked = await client.callTool({ name: 'review_device_call', arguments: { ...input, client_error: 'Blocked', likely_reason: 'Host validation declined the call.' } });
     assert.equal(blocked.structuredContent.after_client_error, true);
+    assert.equal(blocked.structuredContent.block_source, 'host_safety');
+    assert.ok(Array.isArray(blocked.structuredContent.guidance) && blocked.structuredContent.guidance.length > 0);
     assert.equal((await tool('list_devices')).length, 0);
     const store = new Store(db);
     assert.equal(store.db.prepare('SELECT count(*) AS total FROM tasks').get().total, 0);

@@ -233,3 +233,125 @@ test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+test('OAuth refresh_token preserves selectedDevice across rotations and drops it if device is revoked', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-oauth-selected-device-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const admin = store.ensureInitialAdmin();
+  assert.ok(admin);
+  const dev = store.pair(store.invite('workstation', ['read'], admin.id), secret());
+  assert.ok(dev);
+  let oauth;
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, origin);
+      if (await oauth.route(req, res, url)) return;
+      res.writeHead(404).end();
+    } catch {
+      res.writeHead(500).end();
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  oauth = new OAuth(store, { origin, ownerKey: secret() });
+
+  try {
+    const reg = await (await fetch(origin + '/oauth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'ChatGPT',
+        redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect']
+      })
+    })).json();
+
+    const verifier = secret() + secret();
+    const authUrl = origin + '/oauth/authorize?' + new URLSearchParams({
+      client_id: reg.client_id,
+      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+      response_type: 'code',
+      code_challenge: hash(verifier),
+      code_challenge_method: 'S256',
+      state: 'st-refresh',
+      resource: origin + '/mcp',
+      scope: 'remote:use'
+    });
+    const pageHtml = await (await fetch(authUrl)).text();
+    const hidden = Object.fromEntries([...pageHtml.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)">/g)].map(m => [m[1], m[2]]));
+    const consentRes = await fetch(origin + '/oauth/authorize', {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ ...hidden, username: 'admin', password: admin.password })
+    });
+    assert.equal(consentRes.status, 303);
+    const code = new URL(consentRes.headers.get('location')).searchParams.get('code');
+
+    const initialTokens = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+        code_verifier: verifier,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.ok(initialTokens.access_token && initialTokens.refresh_token);
+
+    // Select device on the initial access token
+    assert.equal(store.setOAuthSelectedDevice(initialTokens.access_token, dev.id), true);
+
+    // First refresh rotation
+    const refresh1 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: initialTokens.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.ok(refresh1.access_token && refresh1.refresh_token);
+    assert.equal(store.getAuth(refresh1.access_token, 'access').data.selectedDevice, dev.id);
+
+    // Second refresh rotation still preserves selectedDevice
+    const refresh2 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh1.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.equal(store.getAuth(refresh2.access_token, 'access').data.selectedDevice, dev.id);
+
+    // Revoking the device drops stale selectedDevice on subsequent refresh
+    assert.equal(store.revoke(dev.id, admin.id), true);
+    const refresh3 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh2.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.equal(store.getAuth(refresh3.access_token, 'access').data.selectedDevice, undefined);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});

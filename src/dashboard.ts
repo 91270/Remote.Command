@@ -2,23 +2,27 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { HttpError, json, readJson } from './http.js';
-import { capabilities, hash, match, secret, terminal, uuid, type Capability } from './protocol.js';
-import type { Store } from './store.js';
+import { capabilities, match, secret, terminal, uuid, type Capability } from './protocol.js';
+import { ipDigest, type RateLimiter } from './rate-limit.js';
+import type { Store, UserRecord } from './store.js';
 
 const sessionLifetime = 8 * 60 * 60 * 1000;
 const key = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const deviceName = z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
 const pairingCode = z.string().trim().regex(/^[A-Za-z0-9-]{4,32}$/);
+const oauthClientId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const assets = new Map([
   ['/manage/assets/dashboard.css', ['dashboard.css', 'text/css; charset=utf-8']],
-  ['/manage/assets/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']]
+  ['/manage/assets/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']],
+  ['/assets/landing.css', ['landing.css', 'text/css; charset=utf-8']],
+  ['/assets/landing.js', ['landing.js', 'text/javascript; charset=utf-8']]
 ]);
 
-type DashboardConfig = { origin: string };
-type Session = { digest: string; csrf: string; username?: string };
+type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: RateLimiter };
+type Session = { digest: string; csrf: string; user: UserRecord };
 type DeviceVerification = {
   preview(code: string): { deviceName: string; expiresAt: string } | undefined;
-  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean): { status: string; deviceName: string };
+  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean, userId?: string): { status: string; deviceName: string };
 };
 
 export class Dashboard {
@@ -37,11 +41,13 @@ export class Dashboard {
     if (matching.length !== 1) return;
     const token = matching[0]?.[1];
     if (!token || !key.safeParse(token).success) return;
-    const digest = hash(token);
-    const row = this.store.db.prepare("SELECT data FROM auth WHERE digest=? AND kind='dashboard' AND expires>?").get(digest, Date.now());
-    if (!row) return;
-    const stored = z.object({ csrf: key, username: z.string().optional() }).safeParse(JSON.parse(String(row.data)));
-    if (stored.success) return { digest, csrf: stored.data.csrf, username: stored.data.username };
+    const record = this.store.getAuth(token, 'dashboard');
+    if (!record) return;
+    const stored = z.object({ csrf: key, userId: z.string().min(1) }).safeParse(record.data);
+    if (!stored.success) return;
+    const user = this.store.findUserById(stored.data.userId);
+    if (!user || user.status !== 'active') return;
+    return { digest: record.digest, csrf: stored.data.csrf, user };
   }
 
   private async page(res: ServerResponse, filename: string, contentType: string) {
@@ -51,11 +57,20 @@ export class Dashboard {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
-      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+      'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' https:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     }).end(content);
   }
 
   async route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
+    if (req.method === 'GET' && url.pathname === '/') {
+      await this.page(res, 'landing.html', 'text/html; charset=utf-8');
+      return true;
+    }
+    if (req.method === 'GET' && (url.pathname === '/assets/landing.css' || url.pathname === '/assets/landing.js')) {
+      const asset = assets.get(url.pathname)!;
+      await this.page(res, asset[0]!, asset[1]!);
+      return true;
+    }
     if (url.pathname !== '/manage' && !url.pathname.startsWith('/manage/')) return false;
     try {
       if (url.origin !== this.config.origin || req.headers.origin && req.headers.origin !== this.config.origin) throw new HttpError(403, 'Origin not allowed.');
@@ -71,63 +86,114 @@ export class Dashboard {
       if (!url.pathname.startsWith('/manage/api/')) throw new HttpError(404, 'Not found.');
       if (req.method !== 'GET' && req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
       if (req.method === 'POST' && req.headers.origin !== this.config.origin) throw new HttpError(403, 'Origin required.');
+
+      if (req.method === 'GET' && url.pathname === '/manage/api/auth-config') {
+        json(res, 200, {
+          googleEnabled: !!this.config.googleEnabled,
+          hasPasswordAdmin: this.store.hasPasswordAdmin(),
+          registrationMode: this.store.getRegistrationMode(),
+          initialized: this.store.userCount() > 0
+        });
+        return true;
+      }
+
       if (req.method === 'POST' && url.pathname === '/manage/api/login') {
         const input = z.strictObject({
           username: z.string().trim().min(1).max(80),
           password: z.string().min(1).max(256)
         }).parse(await readJson(req, 4096));
+        const limiter = this.config.rateLimiter;
+        const ip = limiter ? limiter.clientIp(req) : '';
+        const userKey = limiter ? `${ip}:${input.username.toLowerCase()}` : '';
+        if (limiter) {
+          const ipStatus = limiter.check('login_failure', ip);
+          const userStatus = limiter.check('login_failure', userKey);
+          if (!ipStatus.allowed || !userStatus.allowed) {
+            const retryAfterSec = Math.max(ipStatus.retryAfterSec, userStatus.retryAfterSec);
+            if (limiter.shouldAudit('login_failure', ip)) {
+              this.store.audit('rate_limited', { bucket: 'login_failure', route: '/manage/api/login', ip: ipDigest(ip) });
+            }
+            json(res, 429, { error: 'Too many failed login attempts. Try again later.' }, { 'Retry-After': String(retryAfterSec) });
+            return true;
+          }
+        }
         const user = this.store.authenticateUser(input.username, input.password);
-        if (!user || user.role !== 'admin') throw new HttpError(403, 'Username or password is incorrect.');
+        if (!user || user.status !== 'active') {
+          if (limiter) {
+            limiter.consume('login_failure', ip);
+            limiter.consume('login_failure', userKey);
+          }
+          throw new HttpError(403, 'Username or password is incorrect.');
+        }
+        if (limiter) {
+          limiter.reset('login_failure', ip);
+          limiter.reset('login_failure', userKey);
+        }
         const token = secret(), csrf = secret();
         this.store.tx(() => {
           const previous = this.session(req);
-          if (previous) this.store.db.prepare('DELETE FROM auth WHERE digest=?').run(previous.digest);
-          this.store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(
-            hash(token), 'dashboard', Date.now() + sessionLifetime,
-            JSON.stringify({ csrf, userId: user.id, username: user.username, role: user.role })
-          );
-          this.store.audit('dashboard_login', { username: user.username });
+          if (previous) this.store.deleteAuthByDigest(previous.digest);
+          this.store.putAuth(token, 'dashboard', sessionLifetime, {
+            csrf, userId: user.id, username: user.username ?? user.email, role: user.role
+          });
+          this.store.audit('dashboard_login', { username: user.username ?? user.email }, user.id);
         });
-        json(res, 200, { csrf, username: user.username }, { 'Set-Cookie': this.cookie(token, sessionLifetime / 1000) });
+        json(res, 200, { csrf, username: user.username ?? user.email, role: user.role }, { 'Set-Cookie': this.cookie(token, sessionLifetime / 1000) });
         return true;
       }
+
       const session = this.session(req);
       if (!session) throw new HttpError(401, 'Sign in to manage this Gateway.');
       if (req.method === 'POST' && (!key.safeParse(req.headers['x-csrf-token']).success || !match(String(req.headers['x-csrf-token']), session.csrf)))
         throw new HttpError(403, 'CSRF token is missing or invalid.');
+
+      const userId = session.user.id;
+
       if (req.method === 'GET' && url.pathname === '/manage/api/session') {
-        json(res, 200, { csrf: session.csrf, username: session.username ?? 'admin', origin: this.config.origin, mcpUrl: this.config.origin + '/mcp' });
+        json(res, 200, {
+          csrf: session.csrf,
+          userId,
+          username: session.user.username ?? session.user.email ?? 'user',
+          email: session.user.email,
+          displayName: session.user.displayName,
+          role: session.user.role,
+          plan: session.user.plan,
+          googleEnabled: !!this.config.googleEnabled,
+          origin: this.config.origin,
+          mcpUrl: this.config.origin + '/mcp'
+        });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/overview') {
-        const devices = this.store.devices();
-        const counts = this.store.db.prepare('SELECT status,count(*) AS count FROM tasks GROUP BY status').all();
-        const taskCounts = Object.fromEntries(counts.map(row => [String(row.status), Number(row.count)]));
-        json(res, 200, { devices, taskCounts, totalCalls: this.store.totalCalls(),
+        const devices = this.store.devices(userId);
+        const taskCounts = this.store.taskStatusCounts(userId);
+        json(res, 200, {
+          devices,
+          taskCounts,
+          totalCalls: this.store.totalCalls(userId),
           activeTasks: Object.entries(taskCounts).filter(([status]) => !terminal.some(value => value === status)).reduce((sum, [, count]) => sum + count, 0),
-          mcpUrl: this.config.origin + '/mcp', serverTime: new Date().toISOString() });
+          mcpUrl: this.config.origin + '/mcp',
+          serverTime: new Date().toISOString()
+        });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/tasks') {
         const selected = url.searchParams.get('device');
         if (selected) uuid.parse(selected);
-        const query = selected ? 'SELECT id FROM tasks WHERE device=? ORDER BY created DESC LIMIT 60' : 'SELECT id FROM tasks ORDER BY created DESC LIMIT 60';
-        const rows = selected ? this.store.db.prepare(query).all(selected) : this.store.db.prepare(query).all();
-        const tasks = rows.map(row => this.store.task(String(row.id))).filter(task => task !== undefined)
-          .map(task => ({ ...this.store.view(task), output: undefined, result: undefined }));
+        const tasks = this.store.recentTasks(60, selected ?? undefined, userId)
+          .map(task => ({ ...task, output: undefined, result: undefined }));
         json(res, 200, { tasks });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/audit') {
-        const records = this.store.db.prepare('SELECT id,at,event,details FROM audit ORDER BY id DESC LIMIT 80').all()
-          .map(row => ({ id: row.id, at: new Date(Number(row.at)).toISOString(), event: row.event, details: JSON.parse(String(row.details)) }));
+        const records = this.store.recentAudit(80, userId);
         json(res, 200, { records });
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/invites') {
         const input = z.strictObject({ name: deviceName, capabilities: z.array(z.enum(capabilities)).min(1).max(3) }).parse(await readJson(req, 4096));
         if (new Set(input.capabilities).size !== input.capabilities.length) throw new HttpError(400, 'Duplicate capability.');
-        const token = this.store.invite(input.name, input.capabilities);
+        const token = this.store.invite(input.name, input.capabilities, userId);
         json(res, 201, { token, expiresAt: new Date(Date.now() + 600000).toISOString(), capabilities: input.capabilities });
         return true;
       }
@@ -141,18 +207,22 @@ export class Dashboard {
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/device-verify') {
         if (!this.deviceFlow) throw new HttpError(404, 'Device pairing is unavailable.');
-        const input = z.strictObject({ user_code: pairingCode, name: deviceName.optional(),
-          capabilities: z.array(z.enum(capabilities)).min(1).max(3), approve: z.boolean() }).parse(await readJson(req, 4096));
+        const input = z.strictObject({
+          user_code: pairingCode,
+          name: deviceName.optional(),
+          capabilities: z.array(z.enum(capabilities)).min(1).max(3),
+          approve: z.boolean()
+        }).parse(await readJson(req, 4096));
         if (new Set(input.capabilities).size !== input.capabilities.length) throw new HttpError(400, 'Duplicate capability.');
         let result;
-        try { result = this.deviceFlow.verify(input.user_code, input.name, input.capabilities, input.approve); }
+        try { result = this.deviceFlow.verify(input.user_code, input.name, input.capabilities, input.approve, userId); }
         catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Device pairing failed.'); }
         json(res, 200, result);
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/devices/revoke-all') {
         z.strictObject({}).parse(await readJson(req, 4096));
-        json(res, 200, this.store.revokeAllDevices());
+        json(res, 200, this.store.revokeAllDevices(userId));
         return true;
       }
       const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke)$/.exec(url.pathname);
@@ -160,13 +230,10 @@ export class Dashboard {
         const id = uuid.parse(deviceAction[1]);
         if (deviceAction[2] === 'revoke') {
           z.strictObject({}).parse(await readJson(req, 4096));
-          if (!this.store.revoke(id)) throw new HttpError(404, 'Device is unknown or already revoked.');
+          if (!this.store.revoke(id, userId)) throw new HttpError(404, 'Device is unknown or already revoked.');
         } else {
           const input = z.strictObject({ name: deviceName }).parse(await readJson(req, 4096));
-          this.store.tx(() => {
-            if (!this.store.db.prepare('UPDATE devices SET name=? WHERE id=? AND revoked=0').run(input.name, id).changes) throw new HttpError(404, 'Device is unknown or revoked.');
-            this.store.audit('device_renamed', { device: id, name: input.name });
-          });
+          if (!this.store.renameDevice(id, input.name, userId)) throw new HttpError(404, 'Device is unknown or revoked.');
         }
         json(res, 200, { ok: true });
         return true;
@@ -174,28 +241,44 @@ export class Dashboard {
       const taskAction = /^\/manage\/api\/tasks\/([^/]+)(\/cancel)?$/.exec(url.pathname);
       if (taskAction && (req.method === 'GET' && !taskAction[2] || req.method === 'POST' && taskAction[2])) {
         const id = uuid.parse(taskAction[1]);
-        const task = this.store.task(id);
+        const task = this.store.task(id, userId);
         if (!task) throw new HttpError(404, 'Task is unknown or expired.');
         if (req.method === 'POST') {
           z.strictObject({}).parse(await readJson(req, 4096));
-          json(res, 200, this.store.cancel(id));
+          json(res, 200, this.store.cancel(id, userId));
         } else json(res, 200, this.store.view(task));
+        return true;
+      }
+      if (req.method === 'GET' && url.pathname === '/manage/api/oauth/clients') {
+        json(res, 200, { clients: this.store.listAuthorizedOAuthClients(userId) });
+        return true;
+      }
+      const oauthClientRevoke = /^\/manage\/api\/oauth\/clients\/([^/]+)\/revoke$/.exec(url.pathname);
+      if (req.method === 'POST' && oauthClientRevoke) {
+        let rawClientId: string;
+        try {
+          rawClientId = decodeURIComponent(oauthClientRevoke[1]!);
+        } catch {
+          throw new HttpError(400, 'Invalid request.');
+        }
+        const clientId = oauthClientId.parse(rawClientId);
+        z.strictObject({}).parse(await readJson(req, 4096));
+        const revokedTokens = this.store.revokeOAuthClient(clientId, userId);
+        if (!revokedTokens) throw new HttpError(404, 'OAuth client authorization not found or already revoked.');
+        json(res, 200, { ok: true, revokedTokens });
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/oauth/revoke') {
         z.strictObject({}).parse(await readJson(req, 4096));
-        this.store.tx(() => {
-          this.store.db.exec("DELETE FROM auth WHERE kind IN ('access','code','refresh')");
-          this.store.audit('oauth_revoked_all');
-        });
+        this.store.revokeOAuthTokens(userId);
         json(res, 200, { ok: true });
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/logout') {
         z.strictObject({}).parse(await readJson(req, 4096));
         this.store.tx(() => {
-          this.store.db.prepare("DELETE FROM auth WHERE digest=? AND kind='dashboard'").run(session.digest);
-          this.store.audit('dashboard_logout');
+          this.store.deleteAuthByDigest(session.digest, 'dashboard');
+          this.store.audit('dashboard_logout', {}, userId);
         });
         json(res, 200, { ok: true }, { 'Set-Cookie': this.cookie('', 0) });
         return true;

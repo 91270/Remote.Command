@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light dark">
   <title>Remote.Command · 控制台</title>
   <link rel="stylesheet" href="/manage/assets/dashboard.css">
   <script src="/manage/assets/dashboard.js" defer></script>
@@ -11,130 +11,427 @@
 <body>
   <section id="login-view" class="login-view">
     <div class="login-intro">
-      <div class="brand"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote.Command</span></div>
-      <h1>连接你的<br>本地设备</h1>
-      <p>配对工作设备后，通过自建 Gateway 在 ChatGPT 中使用本地文件、搜索和终端。</p>
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote.Command</span></a>
+      <h1>连接你的<br>每一台设备</h1>
+      <p>通过自建 Remote MCP Gateway 让 ChatGPT 安全访问你的工作区文件、搜索与终端，所有敏感操作均由本机确认。</p>
       <div class="connection-map" aria-label="ChatGPT 连接自建 Gateway，设备主动连接 Gateway">
-        <span>ChatGPT</span><i aria-hidden="true"></i><span>Gateway</span><i aria-hidden="true"></i><span>设备</span>
+        <span>ChatGPT</span><i aria-hidden="true"></i><span>Gateway</span><i aria-hidden="true"></i><span>你的设备</span>
       </div>
     </div>
     <div class="login-main">
       <form id="login-form" class="login-card">
         <h2>登录控制台</h2>
-        <p>输入管理员账号与密码（首次启动请在控制台或网关日志中查看初始密码）。</p>
-        <label for="login-username">账号</label>
-        <input id="login-username" name="username" type="text" value="admin" required autocomplete="username">
-        <label for="login-password">密码</label>
-        <input id="login-password" name="password" type="password" required autocomplete="current-password">
-        <button type="submit" class="primary">登录</button>
+        <p id="login-hint">使用 Google 账号安全登录或注册（全新部署的首个 Google 用户将成为管理员）。</p>
+        <a id="google-login-btn" class="primary button-link" href="/auth/google/start?return_to=%2Fmanage" hidden>使用 Google 账号继续</a>
+        <div id="password-login-fields">
+          <label for="login-username">账号</label>
+          <input id="login-username" name="username" type="text" value="admin" required autocomplete="username">
+          <label for="login-password">密码</label>
+          <input id="login-password" name="password" type="password" required autocomplete="current-password">
+          <button type="submit" class="primary">登录</button>
+        </div>
         <p id="login-error" class="error" role="alert"></p>
+        <p class="login-footer-link"><a href="/">← 返回官网首页</a></p>
       </form>
     </div>
   </section>
 
   <div id="app-view" class="app" hidden>
     <aside class="sidebar">
-      <a class="brand" href="/manage"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote Command<span class="brand-sub">MCP 控制台</span></span></a>
+      <a class="brand" href="/">
+        <span class="brand-mark" aria-hidden="true">RC</span>
+        <span>Remote.Command<span class="brand-sub">Remote MCP</span></span>
+      </a>
+
       <nav aria-label="控制台导航">
-        <button type="button" class="nav-link active" data-panel="devices" aria-current="page"><span aria-hidden="true">▣</span>设备</button>
-        <button type="button" class="nav-link" data-panel="tasks"><span aria-hidden="true">≡</span>任务</button>
-        <button type="button" class="nav-link" data-panel="audit"><span aria-hidden="true">◷</span>审计</button>
-        <button type="button" class="nav-link" data-panel="connect"><span aria-hidden="true">↗</span>接入 ChatGPT</button>
+        <button type="button" class="nav-link active" data-panel="devices" aria-current="page">设备</button>
+        <button type="button" class="nav-link" data-panel="usage">用量</button>
+        <button type="button" class="nav-link" data-panel="plan">套餐与计费</button>
+        <button type="button" class="nav-link" data-panel="activity">任务与审计</button>
+        <button type="button" class="nav-link" data-panel="settings">设置</button>
+
+        <div id="admin-nav-group" hidden>
+          <div class="nav-section-label">管理后台</div>
+          <button type="button" class="nav-link" data-panel="admin-overview">全站管理（即将上线）</button>
+        </div>
       </nav>
-      <div class="sidebar-bottom">
-        <div><span class="connection-dot" aria-hidden="true"></span><span>自建 Gateway</span></div>
-        <code id="gateway-host"></code>
-        <button id="logout" class="text-button" type="button">退出登录</button>
+
+      <div class="sidebar-spacer"></div>
+
+      <div class="quota-card" aria-label="当月调用配额">
+        <div class="quota-head">
+          <span>工具调用</span>
+          <span id="sidebar-quota-pct" class="tabular">0%</span>
+        </div>
+        <div class="quota-bar"><div id="sidebar-quota-fill" class="quota-fill"></div></div>
+        <div id="sidebar-quota-text" class="quota-meta">0 / 10,000 本月</div>
+        <div id="sidebar-quota-reset" class="quota-meta">每月 1 日重置</div>
+        <button id="sidebar-upgrade-btn" type="button" class="primary">升级至 Pro</button>
+      </div>
+
+      <div class="sidebar-profile">
+        <div id="profile-trigger" class="profile-chip" role="button" tabindex="0" title="打开个人设置">
+          <span id="sidebar-avatar" class="avatar" aria-hidden="true">U</span>
+          <div class="profile-text">
+            <strong id="sidebar-user">—</strong>
+            <small id="sidebar-role">Free</small>
+          </div>
+        </div>
+        <button id="logout" class="text-button" type="button">退出</button>
       </div>
     </aside>
 
     <main id="console-main">
+      <div id="quota-banner" class="quota-banner" hidden role="status">
+        <span id="quota-banner-text"></span>
+        <button id="banner-upgrade-btn" type="button" class="primary">查看套餐</button>
+      </div>
+
       <header class="page-header">
-        <div><h1 id="page-title">设备</h1><p id="page-description">连接和管理可供 ChatGPT 使用的工作设备。</p></div>
-        <div class="refresh-group"><span id="last-refresh"></span><button id="refresh-now" type="button" class="secondary">刷新</button></div>
+        <div>
+          <h1 id="page-title">设备</h1>
+          <p id="page-description">通过 Remote MCP 让 AI 客户端安全访问你的电脑。</p>
+        </div>
+        <div class="refresh-group">
+          <span id="last-refresh"></span>
+          <button id="refresh-now" type="button" class="secondary">刷新</button>
+        </div>
       </header>
+
       <div id="notice" class="notice" hidden role="status"></div>
 
+      <!-- Panel 1: Devices -->
       <section id="panel-devices" class="panel" aria-label="设备">
-        <div class="stats" aria-label="设备与任务概况">
-          <article><p>在线设备</p><strong id="stat-online">—</strong><span id="stat-paired">等待连接</span></article>
-          <article><p>待本机确认</p><strong id="stat-approval">—</strong><span id="stat-active">等待任务数据</span></article>
-          <article><p>工具调用</p><strong id="stat-calls">—</strong><span>累计任务记录</span></article>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>你的设备</h2>
+              <p id="device-count">正在读取设备列表…</p>
+            </div>
+            <div class="heading-actions">
+              <button id="revoke-all-devices" type="button" class="danger">撤销全部</button>
+              <button id="verify-device" type="button" class="secondary">输入配对码</button>
+              <button id="new-device" type="button" class="primary">+ 添加设备</button>
+            </div>
+          </div>
+          <div id="device-filters" class="filters" hidden>
+            <input id="device-search" type="search" aria-label="搜索设备" placeholder="搜索设备名称或 ID">
+            <select id="device-status" aria-label="按状态筛选">
+              <option value="">全部状态</option>
+              <option value="online">在线</option>
+              <option value="offline">离线</option>
+              <option value="revoked">已撤销</option>
+            </select>
+          </div>
+          <div id="devices" class="device-list" aria-live="polite"></div>
         </div>
-        <div class="section-heading">
-          <div><h2>已配对设备</h2><p id="device-count"></p></div>
-          <div class="heading-actions"><button id="revoke-all-devices" type="button" class="danger">撤销全部设备</button><button id="verify-device" type="button" class="secondary">输入配对码</button><button id="new-device" type="button" class="primary">添加设备</button></div>
-        </div>
-        <div id="device-filters" class="filters" hidden>
-          <input id="device-search" type="search" aria-label="搜索设备" placeholder="搜索名称或设备 ID">
-          <select id="device-status" aria-label="按在线状态筛选"><option value="">所有状态</option><option value="online">在线</option><option value="offline">离线</option><option value="revoked">已撤销</option></select>
-        </div>
-        <div id="devices" class="device-grid" aria-live="polite"></div>
-        <div class="device-overview">
-          <article class="card recent-card">
-            <div class="section-heading"><h2>最近调用</h2><button id="view-all-tasks" type="button" class="text-button">全部任务 →</button></div>
-            <div id="recent-tasks" class="recent-tasks"></div>
-          </article>
-          <article class="card gateway-card">
-            <h2>ChatGPT 接入</h2>
-            <p>将此地址添加为自定义 MCP Server。</p>
-            <div class="copy-field"><code id="overview-mcp-url"></code><button id="copy-overview-mcp" type="button" class="secondary">复制</button></div>
-            <button id="view-connect" type="button" class="text-button">查看 OAuth 设置 →</button>
-          </article>
-        </div>
-      </section>
 
-      <section id="panel-tasks" class="panel" aria-label="任务" hidden>
-        <div class="section-heading">
-          <div><h2>最近任务</h2><p>查看结果、审批状态和取消进度。</p></div>
-          <div class="heading-actions filters">
-            <select id="task-device" aria-label="筛选任务设备"><option value="">所有设备</option></select>
-            <select id="task-status" aria-label="筛选任务状态"><option value="">所有状态</option><option value="active">进行中</option><option value="awaiting_approval">待本机确认</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>在 AI 客户端中使用</h2>
+              <p>使用同一个 Remote MCP 入口连接你的 AI 助手，自动完成 OAuth 授权。</p>
+            </div>
+          </div>
+
+          <div class="client-row">
+            <div class="client-row-head">
+              <div class="client-row-title">
+                <span class="client-icon" aria-hidden="true">GPT</span>
+                <div>
+                  <strong>ChatGPT（推荐）</strong>
+                  <span>添加自定义 MCP Server，支持 OAuth 动态客户端注册</span>
+                </div>
+              </div>
+              <button type="button" class="secondary client-toggle" data-target="drawer-chatgpt">收起</button>
+            </div>
+            <div id="drawer-chatgpt" class="client-drawer">
+              <div class="copy-field">
+                <code id="mcp-url"></code>
+                <button id="copy-mcp" type="button" class="secondary">复制 URL</button>
+              </div>
+              <ol class="steps">
+                <li>在 ChatGPT 设置中新增自定义 MCP Server，粘贴上方 URL 并选择 <strong>OAuth</strong> 认证（无需填写 Client ID / Secret）。</li>
+                <li>跳转至本服务授权页后，一键确认授权即可完成连接。</li>
+                <li>在新对话中直接让 ChatGPT 列出设备并开始操作：</li>
+              </ol>
+              <div class="prompt-chip">
+                <span id="prompt-sample-1">使用 Remote.Command 列出我当前在线的设备，不要修改任何文件。</span>
+                <button type="button" class="text-button copy-prompt" data-source="prompt-sample-1">复制</button>
+              </div>
+              <div class="prompt-chip">
+                <span id="prompt-sample-2">读取工作区里的文件目录结构并总结项目概况，执行任何修改前先给我方案。</span>
+                <button type="button" class="text-button copy-prompt" data-source="prompt-sample-2">复制</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="client-row">
+            <div class="client-row-head">
+              <div class="client-row-title">
+                <span class="client-icon" aria-hidden="true">MCP</span>
+                <div>
+                  <strong>其他 MCP 客户端</strong>
+                  <span>Codex、Cursor、自定义远程 MCP Agent</span>
+                </div>
+              </div>
+              <button type="button" class="secondary client-toggle" data-target="drawer-other-mcp">查看端点</button>
+            </div>
+            <div id="drawer-other-mcp" class="client-drawer" hidden>
+              <p class="subtle">在任意支持 Streamable HTTP + OAuth 2.0 (DCR + PKCE) 的客户端中填入同一 MCP Endpoint 即可使用：</p>
+              <div class="copy-field">
+                <code id="overview-mcp-url"></code>
+                <button id="copy-overview-mcp" type="button" class="secondary">复制 URL</button>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="table-wrap"><table><thead><tr><th scope="col">工具</th><th scope="col">设备</th><th scope="col">状态</th><th scope="col">创建时间</th><th scope="col">操作</th></tr></thead><tbody id="tasks"></tbody></table></div>
       </section>
 
-      <section id="panel-audit" class="panel" aria-label="审计" hidden>
-        <div class="section-heading"><div><h2>操作审计</h2><p>查看配对、权限变更和任务生命周期。</p></div><input id="audit-search" type="search" aria-label="搜索审计" placeholder="搜索事件名称或 ID"></div>
-        <div class="table-wrap"><table><thead><tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">详细信息</th></tr></thead><tbody id="audit"></tbody></table></div>
+      <!-- Panel 2: Usage -->
+      <section id="panel-usage" class="panel" aria-label="用量" hidden>
+        <div class="kpi-grid">
+          <article class="kpi-card">
+            <p class="kpi-label">本月工具调用</p>
+            <p id="usage-month-value" class="kpi-value">0 / 10,000</p>
+            <div class="quota-bar"><div id="usage-quota-fill" class="quota-fill"></div></div>
+            <p id="usage-month-sub" class="kpi-sub">0% 已使用 · 每月 1 日 00:00 UTC 重置</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">日均调用</p>
+            <p id="usage-daily-avg" class="kpi-value">0</p>
+            <p class="kpi-sub">本月累计调用 ÷ 本月已过天数</p>
+          </article>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>调用趋势</h2>
+              <p>近 6 个月按月统计（不含敏感参数与结果正文）</p>
+            </div>
+          </div>
+          <div id="usage-chart" class="usage-chart-wrap" aria-label="近 6 个月调用柱状图"></div>
+        </div>
       </section>
 
-      <section id="panel-connect" class="panel" aria-label="接入 ChatGPT" hidden>
-        <div class="connection-layout">
-          <article class="card">
-            <h2>MCP Server</h2>
-            <p>在 ChatGPT 中添加自定义 MCP Server。</p>
-            <div class="copy-field"><code id="mcp-url"></code><button id="copy-mcp" type="button" class="secondary">复制地址</button></div>
-            <ol class="steps">
-              <li>在 ChatGPT 添加自定义 MCP Server，填入上方地址并选择 OAuth 认证。</li>
-              <li>ChatGPT 将自动发现 OAuth 端点并完成动态客户端注册与配置回填，无需手动填写 Client ID/Secret。</li>
-              <li>跳转至 Gateway 授权页后，使用管理员账号密码登录并确认授权。</li>
-            </ol>
+      <!-- Panel 3: Plan & billing -->
+      <section id="panel-plan" class="panel" aria-label="套餐与计费" hidden>
+        <div class="plan-grid">
+          <article id="plan-card-free" class="plan-card">
+            <div>
+              <div class="card-head">
+                <h2>Free</h2>
+                <span id="badge-plan-free" class="pill online" hidden>当前套餐</span>
+              </div>
+              <p class="plan-price">$0 <span class="subtle">/ 月</span></p>
+            </div>
+            <ul class="plan-features">
+              <li>每月 10,000 次工具调用（每月 1 日重置）</li>
+              <li>支持 ChatGPT 及标准 Remote MCP 客户端</li>
+              <li>工作区隔离、本地人工审批与审计记录</li>
+            </ul>
+            <button type="button" class="secondary" disabled>基础免费计划</button>
           </article>
-          <article class="card">
-            <h2>在对话里使用设备</h2>
-            <p>先列出设备，再选择设备或在调用中指定设备 ID。</p>
-            <pre>列出我的设备。<br>读取这台设备工作区里的 hello.txt。<br>查看最近的后台任务。</pre>
-            <p>设备端确认写入、配置修改和命令执行。</p>
-            <button id="revoke-oauth" type="button" class="danger">撤销全部 ChatGPT 授权</button>
+
+          <article id="plan-card-pro" class="plan-card">
+            <div>
+              <div class="card-head">
+                <h2>Pro</h2>
+                <span id="badge-plan-pro" class="pill online" hidden>当前套餐</span>
+              </div>
+              <p class="plan-price">Unlimited</p>
+            </div>
+            <ul class="plan-features">
+              <li>无限次月度工具调用，重度自动化无限制</li>
+              <li>全功能多设备管理与持续演进支持</li>
+              <li>支持管理员授权或兑换码自助激活（#23 即将上线）</li>
+            </ul>
+            <button id="plan-upgrade-btn" type="button" class="primary">兑换码升级（即将上线）</button>
           </article>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>常见问题</h2>
+          </div>
+          <div class="faq-list">
+            <details>
+              <summary>Free 套餐的 10,000 次额度何时重置？</summary>
+              <p>每月 1 日 00:00 UTC 自动清零重置。达到 80% 时控制台与对话中会给出提醒。</p>
+            </details>
+            <details>
+              <summary>额度用完后已配对的电脑会断开吗？</summary>
+              <p>不会。你的设备仍保持配对状态，只是会暂停新的设备工具调用，待次月重置或升级 Pro 后立即恢复。</p>
+            </details>
+            <details>
+              <summary>哪些操作会触发本地人工审批？</summary>
+              <p>所有写文件、修改配置、执行终端命令、终止进程和断开 Agent 等敏感操作均会在目标设备终端等待人工确认。</p>
+            </details>
+            <details>
+              <summary>多台 AI 客户端可以共享同一账号下的设备吗？</summary>
+              <p>可以。只要在 OAuth 授权时使用同一个 Google 账号登录，ChatGPT 等客户端即可共享该账号名下所有在线设备。</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 4: Activity (Tasks & Audit) -->
+      <section id="panel-activity" class="panel" aria-label="任务与审计" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div class="segmented" role="tablist" aria-label="活动视图切换">
+              <button type="button" class="seg-btn active" data-activity="tasks">最近任务</button>
+              <button type="button" class="seg-btn" data-activity="audit">操作审计</button>
+            </div>
+            <div id="activity-task-filters" class="heading-actions filters">
+              <select id="task-device" aria-label="筛选任务设备"><option value="">全部设备</option></select>
+              <select id="task-status" aria-label="筛选任务状态">
+                <option value="">全部状态</option>
+                <option value="active">进行中</option>
+                <option value="awaiting_approval">待本机确认</option>
+                <option value="succeeded">已完成</option>
+                <option value="failed">失败</option>
+                <option value="cancelled">已取消</option>
+              </select>
+            </div>
+            <div id="activity-audit-filters" class="heading-actions filters" hidden>
+              <input id="audit-search" type="search" aria-label="搜索审计" placeholder="搜索事件名称或 ID">
+            </div>
+          </div>
+
+          <div id="activity-tasks-view" class="table-wrap">
+            <table>
+              <thead><tr><th scope="col">工具</th><th scope="col">设备</th><th scope="col">状态</th><th scope="col">创建时间</th><th scope="col">操作</th></tr></thead>
+              <tbody id="tasks"></tbody>
+            </table>
+          </div>
+
+          <div id="activity-audit-view" class="table-wrap" hidden>
+            <table>
+              <thead><tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">详细信息</th></tr></thead>
+              <tbody id="audit"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 5: Settings -->
+      <section id="panel-settings" class="panel" aria-label="设置" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>个人资料</h2>
+              <p>当前登录账号与权限角色。</p>
+            </div>
+            <button id="settings-logout" type="button" class="secondary">退出登录</button>
+          </div>
+          <div class="device-main">
+            <span id="settings-avatar" class="avatar" aria-hidden="true">U</span>
+            <div>
+              <strong id="settings-email">—</strong>
+              <div id="settings-meta" class="device-meta">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>外观主题</h2>
+              <p>支持浅色、深色或自动跟随系统外观。</p>
+            </div>
+            <div class="segmented" role="group" aria-label="主题切换">
+              <button type="button" class="seg-btn theme-opt" data-theme-choice="light">浅色</button>
+              <button type="button" class="seg-btn theme-opt" data-theme-choice="dark">深色</button>
+              <button type="button" class="seg-btn theme-opt" data-theme-choice="system">跟随系统</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>OAuth 客户端授权</h2>
+              <p>查看已连接的外部 MCP 客户端（如 ChatGPT），可单独撤销某个客户端或清空全部授权。</p>
+            </div>
+            <button id="revoke-oauth" type="button" class="danger">撤销全部授权</button>
+          </div>
+          <div id="oauth-clients" class="device-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- Admin Placeholder (for #24) -->
+      <section id="panel-admin-overview" class="panel" aria-label="全站管理" hidden>
+        <div class="card">
+          <h2>管理员后台（#24 规划中）</h2>
+          <p class="subtle">你当前以管理员身份登录。用户管理、Free/Pro 套餐治理、邀请码与 Pro 兑换码、全站设备与审计监控将在 Issue #24 中接入此分组。</p>
         </div>
       </section>
     </main>
   </div>
 
+  <!-- 3-Step Add Device / 2-Step Reconnect Dialog -->
   <dialog id="start-device-dialog" aria-labelledby="start-device-title">
-    <div class="dialog-heading"><h2 id="start-device-title">添加设备</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-    <p>在要连接的设备终端运行下面的一键安装启动命令（自动配置 Node.js 与 Gateway 地址）：</p>
-    <p class="subtle">Windows (PowerShell)</p>
-    <div class="copy-field"><code id="device-start-ps"></code><button id="copy-device-ps" type="button" class="secondary">复制命令</button></div>
-    <p class="subtle">macOS / Linux (Bash)</p>
-    <div class="copy-field"><code id="device-start-sh"></code><button id="copy-device-sh" type="button" class="secondary">复制命令</button></div>
-    <p>客户端会自动打开浏览器完成配对；无桌面环境可追加 <code>--no-browser</code>，手动输入终端显示的配对码。</p>
-    <div class="dialog-actions"><button id="pair-with-invite" type="button" class="text-button">使用一次性令牌</button><button id="start-enter-code" type="button" class="primary">输入配对码</button></div>
+    <div class="dialog-heading">
+      <h2 id="start-device-title">连接新设备</h2>
+      <button type="button" data-close class="icon-button" aria-label="关闭">×</button>
+    </div>
+
+    <div class="stepper" aria-label="连接步骤">
+      <span id="step-1" class="step-item active"><span class="step-dot"></span>1. 选择方式</span>
+      <span class="step-sep"></span>
+      <span id="step-2" class="step-item"><span class="step-dot"></span>2. 在设备终端运行</span>
+      <span id="step-3-sep" class="step-sep"></span>
+      <span id="step-3" class="step-item"><span class="step-dot"></span>3. 核对短码配对</span>
+    </div>
+
+    <p id="start-device-sub" class="subtle">选择目标电脑的操作系统，复制命令在终端运行即可自动配置环境并连接。</p>
+
+    <div class="segmented" role="tablist" aria-label="操作系统选择">
+      <button type="button" class="seg-btn os-tab" data-os="macos">macOS</button>
+      <button type="button" class="seg-btn os-tab" data-os="windows">Windows</button>
+      <button type="button" class="seg-btn os-tab" data-os="linux">Linux</button>
+    </div>
+
+    <div id="os-panel-unix" class="method-box">
+      <strong>快速安装启动 <span class="method-badge">推荐</span></strong>
+      <p class="subtle">自动检测或下载便携版 Node.js 24（无需 sudo）并启动 Remote Agent。</p>
+      <div class="copy-field">
+        <code id="device-start-sh"></code>
+        <button id="copy-device-sh" type="button" class="primary">复制命令</button>
+      </div>
+    </div>
+
+    <div id="os-panel-windows" class="method-box" hidden>
+      <strong>PowerShell 一键启动 <span class="method-badge">推荐</span></strong>
+      <p class="subtle">自动检测或下载便携版 Node.js 24 并连接当前 Gateway。</p>
+      <div class="copy-field">
+        <code id="device-start-ps"></code>
+        <button id="copy-device-ps" type="button" class="primary">复制命令</button>
+      </div>
+    </div>
+
+    <p id="step-2-hint" class="subtle" hidden>已复制！请打开目标电脑的终端（或 PowerShell），粘贴并按回车运行，保持窗口开启。</p>
+
+    <div id="reconnect-live-pill" class="live-wait-pill" hidden>
+      <span class="status-dot online"></span>
+      <span>正在等待设备上线，连上后本窗口将自动关闭…</span>
+    </div>
+
+    <details id="other-connect-ways" class="accordion-box">
+      <summary>其他连接方式（无桌面环境 / 一次性令牌）</summary>
+      <p class="subtle">无桌面/SSH 环境可在命令末尾追加 <code>--no-browser</code>，随后点击下方「输入配对码」完成确认。</p>
+      <button id="pair-with-invite" type="button" class="text-button">改用一次性邀请令牌 →</button>
+    </details>
+
+    <div class="dialog-actions">
+      <button type="button" data-close class="secondary">关闭</button>
+      <button id="start-enter-code" type="button" class="primary">输入配对码</button>
+    </div>
   </dialog>
 
+  <!-- One-time Invite Token Dialog -->
   <dialog id="pair-dialog" aria-labelledby="pair-title">
     <form id="pair-form">
       <div class="dialog-heading"><h2 id="pair-title">创建一次性令牌</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
@@ -144,24 +441,26 @@
         <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
         <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
       </fieldset>
-      <button class="primary" type="submit">生成令牌</button>
+      <div class="dialog-actions"><button type="button" data-close class="secondary">取消</button><button class="primary" type="submit">生成令牌</button></div>
     </form>
     <div id="pair-result" hidden>
       <div class="dialog-heading"><h2>在设备上配对</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-      <p>在本机运行配对命令，按提示输入令牌。令牌只能使用一次。</p>
-      <pre>node dist/agent.js pair agent.local.json</pre>
+      <p class="subtle">在本机运行配对命令，按提示输入令牌（仅限一次使用）：</p>
+      <pre class="output">node dist/agent.js pair agent.local.json</pre>
       <div class="copy-field"><code id="pair-token"></code><button id="copy-token" type="button" class="secondary">复制令牌</button></div>
-      <p id="pair-expiry"></p><button id="pair-done" type="button" class="primary">完成</button>
+      <p id="pair-expiry" class="subtle"></p>
+      <div class="dialog-actions"><button id="pair-done" type="button" class="primary">完成</button></div>
     </div>
   </dialog>
 
+  <!-- Device Code Verification Dialog -->
   <dialog id="verify-dialog" aria-labelledby="verify-title">
     <form id="verify-form">
       <div class="dialog-heading"><h2 id="verify-title">确认设备配对</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
       <label for="verify-code">终端显示的配对码</label>
       <div class="input-row"><input id="verify-code" name="user_code" required maxlength="32" autocomplete="off" placeholder="ABCDE-FGHIJ"><button id="lookup-device" type="button" class="secondary">核对设备</button></div>
       <div id="verify-details" hidden>
-        <div class="pairing-preview"><span>请求配对的设备</span><strong id="verify-host"></strong><small id="verify-expiry"></small></div>
+        <div class="pairing-preview"><span class="subtle">请求配对的设备</span><strong id="verify-host"></strong><small id="verify-expiry" class="subtle"></small></div>
         <label for="verify-name">设备显示名称（可选）</label>
         <input id="verify-name" name="name" maxlength="80">
         <fieldset><legend>授予设备的权限</legend>
@@ -169,29 +468,31 @@
           <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
           <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
         </fieldset>
-        <p>设备本地配置也会限制实际权限。</p>
+        <p class="subtle">实际执行边界同时受设备本地配置限制。</p>
       </div>
       <p id="verify-error" class="error" role="alert"></p>
       <div id="verify-actions" class="dialog-actions" hidden><button id="deny-device" type="button" class="danger">拒绝</button><button type="submit" class="primary">授权设备</button></div>
     </form>
   </dialog>
 
+  <!-- Task Details Dialog -->
   <dialog id="task-dialog" class="wide-dialog" aria-labelledby="task-title">
     <div class="dialog-heading"><h2 id="task-title">任务详情</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-    <div class="task-information"><span id="task-detail-status"></span><p id="task-meta"></p></div>
+    <div class="device-main"><span id="task-detail-status"></span><p id="task-meta" class="subtle"></p></div>
     <div class="copy-field"><code id="task-id"></code><button id="copy-task-id" type="button" class="secondary">复制任务 ID</button></div>
     <p id="task-approval" class="notice" hidden>请在操作设备的终端查看请求并确认。</p>
-    <h3>结果</h3>
+    <h3>输出与结果</h3>
     <pre id="task-output" class="output"></pre>
-    <div class="dialog-actions"><button id="cancel-task" type="button" class="danger">请求取消任务</button></div>
+    <div class="dialog-actions"><button id="cancel-task" type="button" class="danger">请求取消任务</button><button type="button" data-close class="secondary">关闭</button></div>
   </dialog>
 
+  <!-- Generic Confirm / Rename Dialog -->
   <dialog id="confirm-dialog" aria-labelledby="confirm-title">
     <form method="dialog">
       <div class="dialog-heading"><h2 id="confirm-title"></h2><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
-      <p id="confirm-description"></p>
+      <p id="confirm-description" class="subtle"></p>
       <label id="rename-label" for="rename-value" hidden>设备名称</label><input id="rename-value" maxlength="80" hidden>
-      <div class="dialog-actions"><button value="cancel" class="secondary">返回</button><button id="confirm-submit" value="confirm" class="primary">确认</button></div>
+      <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-submit" value="confirm" class="primary">确认</button></div>
     </form>
   </dialog>
 </body>
