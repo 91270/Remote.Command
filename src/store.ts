@@ -1,8 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { hash, randomPassword, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
@@ -12,6 +12,34 @@ const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interru
 const operationPlaceholders = names.map(() => '?').join(',');
 type Device = { id: string; name: string; credential: string; caps: string; boot: string | null; seen: number | null; platform: string | null; revoked: number };
 type Task = { id: string; device: string; op: Op; args: string; status: string; boot: string | null; created: number; changed: number; deadline: number; cancel: number; output: string | null; seq: number; mcp_result: string | null; tool_name: string | null };
+export type UserRecord = { id: string; username: string | null; email: string | null; role: 'admin' | 'user' };
+export type RegisteredOAuthClient = {
+  clientId: string;
+  clientSecretHash: string;
+  clientName: string | null;
+  redirectUris: string[];
+  grantTypes: string[];
+  responseTypes: string[];
+  tokenEndpointAuthMethod: string;
+  scope: string | null;
+  createdAt: number;
+};
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const derived = scryptSync(password, salt, 64).toString('hex');
+  return `scrypt$${salt}$${derived}`;
+}
+
+function verifyPassword(password: string, stored: string): boolean {
+  const parts = stored.split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, expectedHex] = parts;
+  if (!salt || !expectedHex) return false;
+  const expected = Buffer.from(expectedHex, 'hex');
+  const actual = scryptSync(password, salt, expected.length);
+  return timingSafeEqual(actual, expected);
+}
 
 export class Store {
   readonly db: DatabaseSync;
@@ -32,7 +60,15 @@ export class Store {
       CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS auth (digest TEXT PRIMARY KEY, kind TEXT NOT NULL, expires INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS auth_expiry ON auth(expires);
-      CREATE TABLE IF NOT EXISTS device_catalog (device TEXT PRIMARY KEY, catalog TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS device_catalog (device TEXT PRIMARY KEY, catalog TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE,
+        role TEXT NOT NULL DEFAULT 'user', password_hash TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, provider_sub TEXT NOT NULL,
+        user_id TEXT NOT NULL, email TEXT, created_at INTEGER NOT NULL,
+        PRIMARY KEY(provider, provider_sub), FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+      CREATE TABLE IF NOT EXISTS oauth_clients (client_id TEXT PRIMARY KEY, client_secret_hash TEXT NOT NULL,
+        client_name TEXT, redirect_uris TEXT NOT NULL, grant_types TEXT NOT NULL, response_types TEXT NOT NULL,
+        token_endpoint_auth_method TEXT NOT NULL, scope TEXT, created_at INTEGER NOT NULL);`);
     this.tx(() => {
       const columns = this.db.prepare('PRAGMA table_info(tasks)').all();
       if (!columns.some(column => column.name === 'mcp_result')) this.db.exec('ALTER TABLE tasks ADD COLUMN mcp_result TEXT');
@@ -226,5 +262,76 @@ export class Store {
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));
       return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack };
     });
+  }
+
+  ensureInitialAdmin(initialPassword?: string): { username: string; password: string } | null {
+    return this.tx(() => {
+      const existing = this.db.prepare("SELECT 1 FROM users WHERE role='admin' LIMIT 1").get();
+      if (existing) return null;
+      const password = initialPassword ?? randomPassword(8);
+      const id = randomUUID();
+      this.db.prepare("INSERT INTO users(id,username,email,role,password_hash,created_at) VALUES(?,?,NULL,'admin',?,?)")
+        .run(id, 'admin', hashPassword(password), Date.now());
+      this.audit('admin_initialized', { username: 'admin' });
+      return { username: 'admin', password };
+    });
+  }
+
+  authenticateUser(username: string, password: string): UserRecord | null {
+    const row = this.db.prepare('SELECT id,username,email,role,password_hash FROM users WHERE username=?').get(username);
+    if (!row || typeof row.password_hash !== 'string') return null;
+    if (!verifyPassword(password, row.password_hash)) return null;
+    return {
+      id: String(row.id),
+      username: row.username ? String(row.username) : null,
+      email: row.email ? String(row.email) : null,
+      role: row.role === 'admin' ? 'admin' : 'user'
+    };
+  }
+
+  registerOAuthClient(input: {
+    clientName: string | null;
+    redirectUris: string[];
+    grantTypes: string[];
+    responseTypes: string[];
+    tokenEndpointAuthMethod: string;
+    scope: string | null;
+  }): { clientId: string; clientSecret: string; createdAt: number } {
+    return this.tx(() => {
+      const clientId = 'rcm_' + secret().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24);
+      const clientSecret = secret();
+      const createdAt = Date.now();
+      this.db.prepare(
+        'INSERT INTO oauth_clients(client_id,client_secret_hash,client_name,redirect_uris,grant_types,response_types,token_endpoint_auth_method,scope,created_at) VALUES(?,?,?,?,?,?,?,?,?)'
+      ).run(
+        clientId,
+        hash(clientSecret),
+        input.clientName,
+        JSON.stringify(input.redirectUris),
+        JSON.stringify(input.grantTypes),
+        JSON.stringify(input.responseTypes),
+        input.tokenEndpointAuthMethod,
+        input.scope,
+        createdAt
+      );
+      this.audit('oauth_client_registered', { clientId, clientName: input.clientName, redirectUris: input.redirectUris });
+      return { clientId, clientSecret, createdAt };
+    });
+  }
+
+  findOAuthClient(clientId: string): RegisteredOAuthClient | null {
+    const row = this.db.prepare('SELECT * FROM oauth_clients WHERE client_id=?').get(clientId);
+    if (!row) return null;
+    return {
+      clientId: String(row.client_id),
+      clientSecretHash: String(row.client_secret_hash),
+      clientName: row.client_name ? String(row.client_name) : null,
+      redirectUris: JSON.parse(String(row.redirect_uris)) as string[],
+      grantTypes: JSON.parse(String(row.grant_types)) as string[],
+      responseTypes: JSON.parse(String(row.response_types)) as string[],
+      tokenEndpointAuthMethod: String(row.token_endpoint_auth_method),
+      scope: row.scope ? String(row.scope) : null,
+      createdAt: Number(row.created_at)
+    };
   }
 }

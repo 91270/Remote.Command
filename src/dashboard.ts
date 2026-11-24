@@ -14,8 +14,8 @@ const assets = new Map([
   ['/manage/assets/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']]
 ]);
 
-type DashboardConfig = { origin: string; ownerKey: string };
-type Session = { digest: string; csrf: string };
+type DashboardConfig = { origin: string };
+type Session = { digest: string; csrf: string; username?: string };
 type DeviceVerification = {
   preview(code: string): { deviceName: string; expiresAt: string } | undefined;
   verify(code: string, name: string | undefined, caps: Capability[], approve: boolean): { status: string; deviceName: string };
@@ -40,8 +40,8 @@ export class Dashboard {
     const digest = hash(token);
     const row = this.store.db.prepare("SELECT data FROM auth WHERE digest=? AND kind='dashboard' AND expires>?").get(digest, Date.now());
     if (!row) return;
-    const stored = z.object({ csrf: key }).safeParse(JSON.parse(String(row.data)));
-    if (stored.success) return { digest, csrf: stored.data.csrf };
+    const stored = z.object({ csrf: key, username: z.string().optional() }).safeParse(JSON.parse(String(row.data)));
+    if (stored.success) return { digest, csrf: stored.data.csrf, username: stored.data.username };
   }
 
   private async page(res: ServerResponse, filename: string, contentType: string) {
@@ -72,16 +72,23 @@ export class Dashboard {
       if (req.method !== 'GET' && req.method !== 'POST') throw new HttpError(405, 'Method not allowed.');
       if (req.method === 'POST' && req.headers.origin !== this.config.origin) throw new HttpError(403, 'Origin required.');
       if (req.method === 'POST' && url.pathname === '/manage/api/login') {
-        const input = z.strictObject({ ownerKey: key }).parse(await readJson(req, 4096));
-        if (!match(input.ownerKey, this.config.ownerKey)) throw new HttpError(403, 'Owner key is incorrect.');
+        const input = z.strictObject({
+          username: z.string().trim().min(1).max(80),
+          password: z.string().min(1).max(256)
+        }).parse(await readJson(req, 4096));
+        const user = this.store.authenticateUser(input.username, input.password);
+        if (!user || user.role !== 'admin') throw new HttpError(403, 'Username or password is incorrect.');
         const token = secret(), csrf = secret();
         this.store.tx(() => {
           const previous = this.session(req);
           if (previous) this.store.db.prepare('DELETE FROM auth WHERE digest=?').run(previous.digest);
-          this.store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(token), 'dashboard', Date.now() + sessionLifetime, JSON.stringify({ csrf }));
-          this.store.audit('dashboard_login');
+          this.store.db.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(
+            hash(token), 'dashboard', Date.now() + sessionLifetime,
+            JSON.stringify({ csrf, userId: user.id, username: user.username, role: user.role })
+          );
+          this.store.audit('dashboard_login', { username: user.username });
         });
-        json(res, 200, { csrf }, { 'Set-Cookie': this.cookie(token, sessionLifetime / 1000) });
+        json(res, 200, { csrf, username: user.username }, { 'Set-Cookie': this.cookie(token, sessionLifetime / 1000) });
         return true;
       }
       const session = this.session(req);
@@ -89,7 +96,7 @@ export class Dashboard {
       if (req.method === 'POST' && (!key.safeParse(req.headers['x-csrf-token']).success || !match(String(req.headers['x-csrf-token']), session.csrf)))
         throw new HttpError(403, 'CSRF token is missing or invalid.');
       if (req.method === 'GET' && url.pathname === '/manage/api/session') {
-        json(res, 200, { csrf: session.csrf, origin: this.config.origin, mcpUrl: this.config.origin + '/mcp' });
+        json(res, 200, { csrf: session.csrf, username: session.username ?? 'admin', origin: this.config.origin, mcpUrl: this.config.origin + '/mcp' });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/overview') {

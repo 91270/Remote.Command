@@ -4,7 +4,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { createServer as httpsServer, request as httpsRequest } from 'node:https';
 import { request as httpRequest } from 'node:http';
-import { mkdtemp, mkdir, rm, readFile, writeFile, rename, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, readFile, writeFile, rename, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -127,12 +127,21 @@ test('Gateway initializes private credentials once and reuses them after restart
       assert.equal((await stat(ownerFile)).mode & 0o777, 0o600);
     }
     assert.ok(!gateway.output().includes(clientSecret) && !gateway.output().includes(ownerKey));
+    const adminMatch = /username=admin password=([A-Za-z0-9]{8})/.exec(gateway.output());
+    assert.ok(adminMatch, gateway.output());
+    const adminPassword = adminMatch[1];
+    const logDir = join(state, 'logs');
+    const logFiles = (await readdir(logDir)).filter(name => /^\d{8}-\d{4}\.log$/.test(name));
+    assert.ok(logFiles.length >= 1);
+    const logContent = await readFile(join(logDir, logFiles.at(-1)), 'utf8');
+    assert.ok(logContent.includes(`username=admin password=${adminPassword}`));
 
     await stop(gateway);
     await boot();
     assert.ok((await readFile(clientFile, 'utf8')).trim() === clientSecret);
     assert.ok((await readFile(ownerFile, 'utf8')).trim() === ownerKey);
-    const login = await post(origin + '/manage/api/login', { ownerKey }, { Origin: origin });
+    assert.ok(!/password=/.test(gateway.output()));
+    const login = await post(origin + '/manage/api/login', { username: 'admin', password: adminPassword }, { Origin: origin });
     assert.equal(login.status, 200);
   } finally {
     await stop(gateway);
@@ -248,6 +257,8 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     await writeFile(config, JSON.stringify({ gateway: agentOrigin, workspace: ws, stateDir, allowInsecureLoopback: !proxy,
       capabilities: ['read', 'write', 'exec'] }));
     await startGateway();
+    const adminPassword = /username=admin password=([A-Za-z0-9]{8})/.exec(gateway.output())?.[1];
+    assert.ok(adminPassword, gateway.output());
     assert.equal((await fetch(resource)).status, 401);
     assert.equal((await fetch(resource, { headers: { Origin: 'https://invalid.example' } })).status, 403);
     const meta = await (await fetch(origin + '/.well-known/oauth-protected-resource/mcp')).json();
@@ -264,13 +275,13 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
       'The consent page must preserve the Origin header on same-origin browser form submissions.');
     const page = await authorizationPage.text();
     const base = { ...authParams, until: /name="until" value="([^"]+)"/.exec(page)[1], proof: /name="proof" value="([^"]+)"/.exec(page)[1] };
-    const opaqueOrigin = await form(origin, '/oauth/authorize', { ...base, owner_key: owner }, { Origin: 'null' });
+    const opaqueOrigin = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: adminPassword }, { Origin: 'null' });
     assert.equal(opaqueOrigin.status, 403);
     assert.deepEqual(await opaqueOrigin.json(), { error: 'Origin not allowed.' });
-    const wrongOwnerKey = await form(origin, '/oauth/authorize', { ...base, owner_key: secret() }, { Origin: origin });
+    const wrongOwnerKey = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: 'wrongpwd' }, { Origin: origin });
     assert.equal(wrongOwnerKey.status, 403);
     assert.deepEqual(await wrongOwnerKey.json(), { error: 'access_denied' });
-    const authorized = await form(origin, '/oauth/authorize', { ...base, owner_key: owner }, { Origin: origin });
+    const authorized = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: adminPassword }, { Origin: origin });
     assert.equal(authorized.status, 303);
     assert.equal(authorized.headers.get('referrer-policy'), 'no-referrer');
     const callback = new URL(authorized.headers.get('location'));
@@ -315,7 +326,7 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     store.db.close();
     const idFile = join(stateDir, 'identity.json');
     const dashboardAuth = async () => {
-      const response = await post(origin + '/manage/api/login', { ownerKey: owner }, { Origin: origin });
+      const response = await post(origin + '/manage/api/login', { username: 'admin', password: adminPassword }, { Origin: origin });
       const ownerSession = await response.json();
       const cookie = response.headers.get('set-cookie').split(';')[0];
       return { Origin: origin, Cookie: cookie, 'X-CSRF-Token': ownerSession.csrf };

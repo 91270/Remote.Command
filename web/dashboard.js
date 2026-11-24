@@ -54,7 +54,8 @@ async function act(action) {
 function showLogin() {
   csrf = '';
   byId('notice').hidden = true;
-  byId('owner-key').value = '';
+  byId('login-username').value = 'admin';
+  byId('login-password').value = '';
   byId('app-view').hidden = true;
   byId('login-view').hidden = false;
   document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
@@ -290,8 +291,11 @@ byId('login-form').addEventListener('submit', async event => {
   submit.disabled = true;
   byId('login-error').textContent = '';
   try {
-    const session = await api('login', { ownerKey: byId('owner-key').value.trim() });
-    byId('owner-key').value = '';
+    const session = await api('login', {
+      username: byId('login-username').value.trim(),
+      password: byId('login-password').value
+    });
+    byId('login-password').value = '';
     await showApp(session);
   } catch (error) { byId('login-error').textContent = error.message; }
   finally { submit.disabled = false; }

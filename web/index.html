@@ -21,9 +21,11 @@
     <div class="login-main">
       <form id="login-form" class="login-card">
         <h2>登录控制台</h2>
-        <p>输入部署时生成的 Owner key。</p>
-        <label for="owner-key">Owner key</label>
-        <input id="owner-key" name="ownerKey" type="password" required autocomplete="off">
+        <p>输入管理员账号与密码（首次启动请在控制台或网关日志中查看初始密码）。</p>
+        <label for="login-username">账号</label>
+        <input id="login-username" name="username" type="text" value="admin" required autocomplete="username">
+        <label for="login-password">密码</label>
+        <input id="login-password" name="password" type="password" required autocomplete="current-password">
         <button type="submit" class="primary">登录</button>
         <p id="login-error" class="error" role="alert"></p>
       </form>
@@ -105,9 +107,9 @@
             <p>在 ChatGPT 中添加自定义 MCP Server。</p>
             <div class="copy-field"><code id="mcp-url"></code><button id="copy-mcp" type="button" class="secondary">复制地址</button></div>
             <ol class="steps">
-              <li>选择 OAuth 认证，填写 Gateway 部署配置中的客户端 ID 和 secret。</li>
-              <li>核对 ChatGPT 显示的回调地址和 Gateway 的允许列表。</li>
-              <li>打开授权页，输入 Owner key，完成连接。</li>
+              <li>在 ChatGPT 添加自定义 MCP Server，填入上方地址并选择 OAuth 认证。</li>
+              <li>ChatGPT 将自动发现 OAuth 端点并完成动态客户端注册与配置回填，无需手动填写 Client ID/Secret。</li>
+              <li>跳转至 Gateway 授权页后，使用管理员账号密码登录并确认授权。</li>
             </ol>
           </article>
           <article class="card">

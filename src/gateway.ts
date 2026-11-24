@@ -7,6 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, ListResourceTemplatesRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { readJson, json, bearer, HttpError } from './http.js';
+import { RotatingLogger } from './logger.js';
 import { OAuth } from './oauth.js';
 import { Store } from './store.js';
 import { Dashboard } from './dashboard.js';
@@ -48,13 +49,34 @@ if (origin.startsWith('http:') && bindHost !== '127.0.0.1') throw new Error('Pla
 const origins = new Set([origin, 'https://chatgpt.com', ...(env.MCP_ALLOWED_ORIGINS ?? '').split(',').filter(Boolean)]);
 const stateFile = env.STATE_DB ?? 'state/gateway.sqlite';
 const stateDirectory = dirname(stateFile);
+const logger = new RotatingLogger({
+  dir: env.LOG_DIR ?? join(stateDirectory, 'logs'),
+  maxBytes: env.LOG_MAX_BYTES ? Number(env.LOG_MAX_BYTES) : undefined,
+  maxFiles: env.LOG_MAX_FILES ? Number(env.LOG_MAX_FILES) : undefined
+});
 const clientSecret = runtimeSecret(env.OAUTH_CLIENT_SECRET, env.OAUTH_CLIENT_SECRET_FILE, join(stateDirectory, '.oauth_client_secret'));
 const ownerKey = runtimeSecret(env.OWNER_KEY, env.OWNER_KEY_FILE, join(stateDirectory, '.owner_key'));
 const store = new Store(stateFile);
-const oauth = new OAuth(store, { origin, clientId: env.OAUTH_CLIENT_ID ?? '', clientSecret,
-  ownerKey, redirects: new Set((env.OAUTH_REDIRECT_URIS ?? '').split(',').filter(Boolean)) });
+const initialAdmin = store.ensureInitialAdmin();
+if (initialAdmin) {
+  logger.info(`Initial admin account created. username=${initialAdmin.username} password=${initialAdmin.password}`, true);
+}
+const allowedRedirectHosts = env.OAUTH_ALLOWED_REDIRECT_HOSTS
+  ? new Set(env.OAUTH_ALLOWED_REDIRECT_HOSTS.split(',').map(s => s.trim()).filter(Boolean))
+  : undefined;
+const staticRedirects = env.OAUTH_REDIRECT_URIS
+  ? new Set(env.OAUTH_REDIRECT_URIS.split(',').map(s => s.trim()).filter(Boolean))
+  : undefined;
+const oauth = new OAuth(store, {
+  origin,
+  clientId: env.OAUTH_CLIENT_ID || undefined,
+  clientSecret,
+  ownerKey,
+  redirects: staticRedirects,
+  allowedRedirectHosts
+});
 const deviceFlow = new DeviceFlow(store, origin);
-const dashboard = new Dashboard(store, { origin, ownerKey }, deviceFlow);
+const dashboard = new Dashboard(store, { origin }, deviceFlow);
 const pinnedCatalog = catalog.parse(JSON.parse(readFileSync(new URL('../vendor/desktop-commander-full/catalog.json', import.meta.url), 'utf8')));
 const reviewUri = 'ui://remote-command/call-review.html';
 const reviewMime = 'text/html;profile=mcp-app';
@@ -252,16 +274,18 @@ const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, as
     if (res.headersSent) { res.end(); return; }
     if (e instanceof HttpError) return json(res, e.status, { error: e.message });
     if (e instanceof z.ZodError) return json(res, 400, { error: 'Malformed request.' });
-    console.error('Gateway request failed:', e instanceof Error ? e.name : 'unknown');
+    logger.error(`Gateway request failed: ${e instanceof Error ? e.name : 'unknown'}`, true);
     return json(res, 500, { error: 'Internal server error.' });
   }
 });
 store.maintain(taskDays, auditDays);
 const cleanup = setInterval(() => {
-  try { store.maintain(taskDays, auditDays); } catch { console.error('Gateway database maintenance failed.'); }
+  try { store.maintain(taskDays, auditDays); } catch { logger.error('Gateway database maintenance failed.', true); }
 }, 30000);
 cleanup.unref();
-server.listen(Number(env.PORT ?? 8787), bindHost, () => console.log('Gateway listening at', server.address()));
+server.listen(Number(env.PORT ?? 8787), bindHost, () => {
+  logger.info(`Gateway listening at ${JSON.stringify(server.address())}`, true);
+});
 function shutdown() {
   if (draining) return;
   draining = true;

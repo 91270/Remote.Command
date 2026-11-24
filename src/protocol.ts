@@ -6,6 +6,21 @@ import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 export const secret = () => randomBytes(32).toString('base64url');
 export const hash = (s: string) => createHash('sha256').update(s).digest('base64url');
 export const match = (a: string, b: string) => timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
+export function randomPassword(length = 8): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const maxValid = 256 - (256 % alphabet.length);
+  let out = '';
+  while (out.length < length) {
+    const bytes = randomBytes(length * 2);
+    for (const byte of bytes) {
+      if (byte < maxValid) {
+        out += alphabet[byte % alphabet.length]!;
+        if (out.length === length) break;
+      }
+    }
+  }
+  return out;
+}
 export const uuid = z.uuid();
 export const agentClientId = 'remote-command-agent';
 export const { version: projectVersion } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };

@@ -13,7 +13,10 @@ import { secret, hash } from '../dist/protocol.js';
 test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, revocation and logout', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'rcm-dashboard-'));
   const store = new Store(join(temp, 'gateway.sqlite'));
-  const ownerKey = secret();
+  const admin = store.ensureInitialAdmin();
+  assert.ok(admin);
+  assert.equal(admin.username, 'admin');
+  assert.equal(admin.password.length, 8);
   let dashboard;
   const server = createServer(async (req, res) => {
     try {
@@ -24,7 +27,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
   await once(server, 'listening');
   const origin = 'http://127.0.0.1:' + server.address().port;
   const verifications = [];
-  dashboard = new Dashboard(store, { origin, ownerKey }, { preview(code) {
+  dashboard = new Dashboard(store, { origin }, { preview(code) {
     if (code === 'ABCD-EFGH') return { deviceName: 'Desktop device', expiresAt: '2026-11-18T10:10:00Z' };
   }, verify(code, name, caps, approve) {
     if (code !== 'ABCD-EFGH') throw new Error('Unknown device code.');
@@ -47,9 +50,9 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     assert.equal((await request('/assets/dashboard.js')).status, 200);
     assert.equal((await request('/api/overview')).status, 401);
     assert.equal((await request('/api/devices/revoke-all', {})).status, 401);
-    assert.equal((await request('/api/login', { ownerKey: secret() })).status, 403);
-    assert.equal((await request('/api/login', { ownerKey }, { Origin: 'https://elsewhere.example' })).status, 403);
-    const login = await request('/api/login', { ownerKey });
+    assert.equal((await request('/api/login', { username: 'admin', password: 'wrong123' })).status, 403);
+    assert.equal((await request('/api/login', { username: 'admin', password: admin.password }, { Origin: 'https://elsewhere.example' })).status, 403);
+    const login = await request('/api/login', { username: 'admin', password: admin.password });
     assert.equal(login.status, 200);
     const rawCookie = login.headers.get('set-cookie');
     assert.match(rawCookie, /^rcm_dashboard=/);
@@ -125,7 +128,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     const audit = await (await request('/api/audit')).json();
     const serialized = JSON.stringify(audit);
     assert.match(serialized, /devices_revoked_all/);
-    for (const sensitive of [ownerKey, token, credential, csrf]) assert.equal(serialized.includes(sensitive), false);
+    for (const sensitive of [admin.password, token, credential, csrf]) assert.equal(serialized.includes(sensitive), false);
     assert.equal((await request('/api/logout', {})).status, 200);
     assert.equal((await request('/api/session')).status, 401);
   } finally {
