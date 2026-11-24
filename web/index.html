@@ -126,11 +126,12 @@
 
   <dialog id="start-device-dialog" aria-labelledby="start-device-title">
     <div class="dialog-heading"><h2 id="start-device-title">添加设备</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-    <p>在要连接的设备上安装 Node.js 24 至 26，然后在终端运行这条命令。</p>
-    <div class="copy-field"><code id="device-start-command">npx --yes --ignore-scripts --package=https://github.com/91270/Remote.Command/releases/download/v0.4.1/remote-command-0.4.1.tgz remote-command remote</code><button id="copy-device-start" type="button" class="secondary">复制命令</button></div>
-    <p>首次运行填写的 Gateway 地址</p>
-    <div class="copy-field"><code id="device-gateway-url"></code><button id="copy-gateway" type="button" class="secondary">复制地址</button></div>
-    <p>客户端会打开浏览器配对。也可以手动输入终端显示的配对码。</p>
+    <p>在要连接的设备终端运行下面的一键安装启动命令（自动配置 Node.js 与 Gateway 地址）：</p>
+    <p class="subtle">Windows (PowerShell)</p>
+    <div class="copy-field"><code id="device-start-ps"></code><button id="copy-device-ps" type="button" class="secondary">复制命令</button></div>
+    <p class="subtle">macOS / Linux (Bash)</p>
+    <div class="copy-field"><code id="device-start-sh"></code><button id="copy-device-sh" type="button" class="secondary">复制命令</button></div>
+    <p>客户端会自动打开浏览器完成配对；无桌面环境可追加 <code>--no-browser</code>，手动输入终端显示的配对码。</p>
     <div class="dialog-actions"><button id="pair-with-invite" type="button" class="text-button">使用一次性令牌</button><button id="start-enter-code" type="button" class="primary">输入配对码</button></div>
   </dialog>
 

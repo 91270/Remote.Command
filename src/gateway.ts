@@ -7,6 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, ListResourceTemplatesRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { readJson, json, bearer, HttpError } from './http.js';
+import { Installer } from './installer.js';
 import { RotatingLogger } from './logger.js';
 import { OAuth } from './oauth.js';
 import { Store } from './store.js';
@@ -54,7 +55,9 @@ const logger = new RotatingLogger({
   maxBytes: env.LOG_MAX_BYTES ? Number(env.LOG_MAX_BYTES) : undefined,
   maxFiles: env.LOG_MAX_FILES ? Number(env.LOG_MAX_FILES) : undefined
 });
-const clientSecret = runtimeSecret(env.OAUTH_CLIENT_SECRET, env.OAUTH_CLIENT_SECRET_FILE, join(stateDirectory, '.oauth_client_secret'));
+const clientSecret = env.OAUTH_CLIENT_ID
+  ? runtimeSecret(env.OAUTH_CLIENT_SECRET, env.OAUTH_CLIENT_SECRET_FILE, join(stateDirectory, '.oauth_client_secret'))
+  : undefined;
 const ownerKey = runtimeSecret(env.OWNER_KEY, env.OWNER_KEY_FILE, join(stateDirectory, '.owner_key'));
 const store = new Store(stateFile);
 const initialAdmin = store.ensureInitialAdmin();
@@ -77,6 +80,7 @@ const oauth = new OAuth(store, {
 });
 const deviceFlow = new DeviceFlow(store, origin);
 const dashboard = new Dashboard(store, { origin }, deviceFlow);
+const installer = new Installer(origin);
 const pinnedCatalog = catalog.parse(JSON.parse(readFileSync(new URL('../vendor/desktop-commander-full/catalog.json', import.meta.url), 'utf8')));
 const reviewUri = 'ui://remote-command/call-review.html';
 const reviewMime = 'text/html;profile=mcp-app';
@@ -244,6 +248,7 @@ const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, as
       return json(res, 200, { ok: true });
     }
     if (await dashboard.route(req, res, url)) return;
+    if (await installer.route(req, res, url)) return;
     if (await deviceFlow.route(req, res, url)) return;
     if (await oauth.route(req, res, url)) return;
     if (req.method === 'POST' && url.pathname === '/device/pair') {

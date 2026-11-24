@@ -20,6 +20,10 @@ const help = `Usage: remote-command remote [options]
   --disable-no-sleep    Disable macOS keep-awake mode.
   --debug               Print executor recovery details.
   --no-browser          Print the pairing URL without opening a browser.
+  --gateway URL         Preset the self-hosted Gateway HTTPS URL on first run.
+  --workspace PATH      Preset the allowed workspace directory on first run.
+  --allow CAPS          Preset permissions (read,write,exec) on first run.
+  -y, --yes             Accept defaults for unspecified first-run prompts.
   --config PATH         Select the Agent JSON configuration file.
   -h, --help            Show this help.
 
@@ -33,6 +37,10 @@ const options = {
   'disable-no-sleep': { type: 'boolean' },
   debug: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
+  gateway: { type: 'string' },
+  workspace: { type: 'string' },
+  allow: { type: 'string' },
+  yes: { type: 'boolean', short: 'y' },
   config: { type: 'string' }
 } as const;
 
@@ -44,20 +52,23 @@ async function exists(filename: string) {
   }
 }
 
-async function configure(file: string, defaultConfig: boolean) {
-  if (!process.stdin.isTTY) {
-    throw new Error('First run needs a terminal. Run remote interactively or supply an existing Agent JSON file with --config.');
+type PresetConfig = { gateway?: string; workspace?: string; allow?: string; yes?: boolean };
+
+async function configure(file: string, defaultConfig: boolean, preset: PresetConfig = {}) {
+  const needsPrompt = !preset.gateway || (!preset.yes && (!preset.workspace || !preset.allow));
+  if (needsPrompt && !process.stdin.isTTY) {
+    throw new Error('First run needs a terminal. Pass --gateway <url> --yes or supply an existing Agent JSON file with --config.');
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = needsPrompt ? createInterface({ input: process.stdin, output: process.stdout }) : undefined;
   const abort = new AbortController();
-  rl.on('SIGINT', () => abort.abort());
-  const answer = async (prompt: string) => (await rl.question(prompt, { signal: abort.signal })).trim();
+  rl?.on('SIGINT', () => abort.abort());
+  const answer = async (prompt: string) => (await rl!.question(prompt, { signal: abort.signal })).trim();
   try {
-    const gateway = endpoint(await answer('Self-hosted Gateway HTTPS URL: ')).origin;
-    const path = await answer('Workspace directory (Enter for the current directory): ');
+    const gateway = endpoint(preset.gateway ?? await answer('Self-hosted Gateway HTTPS URL: ')).origin;
+    const path = preset.workspace ?? (preset.yes ? '' : await answer('Workspace directory (Enter for the current directory): '));
     const workspace = await realpath(resolve(path || process.cwd()));
-    const scopes = await answer('Local permissions (read,write,exec; Enter for read): ');
+    const scopes = preset.allow ?? (preset.yes ? '' : await answer('Local permissions (read,write,exec; Enter for read): '));
     const enabled = [...new Set((scopes || 'read').split(',').map(value => value.trim()))];
     if (!enabled.every(value => capabilities.some(cap => cap === value))) throw new Error('Use read, write, and/or exec.');
     const parent = dirname(file);
@@ -69,7 +80,7 @@ async function configure(file: string, defaultConfig: boolean) {
     await resolveAgentConfig(config, canonicalFile);
     await writeFile(canonicalFile, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     console.log('Saved configuration:', canonicalFile);
-  } finally { rl.close(); }
+  } finally { rl?.close(); }
 }
 
 async function main() {
@@ -92,7 +103,12 @@ async function main() {
     if (explicit && maintenance !== 'connect') throw new Error('Agent configuration not found: ' + file);
     if (maintenance === 'logout') { console.log('This Agent has no saved identity.'); return; }
     if (maintenance === 'report') { await deviceReport(); return; }
-    await configure(file, file === defaultFile);
+    await configure(file, file === defaultFile, {
+      gateway: values.gateway,
+      workspace: values.workspace,
+      allow: values.allow,
+      yes: values.yes
+    });
   }
   const flags = ['no-persist-session', 'disable-no-sleep', 'debug', 'no-browser'] as const;
   await runAgentCli([maintenance, file, ...flags.filter(flag => values[flag]).map(flag => '--' + flag)]);

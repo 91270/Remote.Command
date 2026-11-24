@@ -38,47 +38,73 @@ flowchart LR
 
 在已安装 Docker Compose 和 Nginx 的 Linux 服务器上部署。将自定义域名解析到这台服务器，并为 Nginx 配置域名证书。公网客户端统一访问 HTTPS `443`。
 
-1. 将 [compose.yaml](compose.yaml) 保存到服务器，在文件中设置 `PUBLIC_ORIGIN`、`OAUTH_CLIENT_ID`、`OAUTH_REDIRECT_URIS` 和 `volumes.source`。按 [运维指南](docs/production.md#1-首次部署) 准备数据目录。
-2. 执行以下命令。Compose 按需拉取镜像，Gateway 在首次启动时将密钥保存在 `data/.oauth_client_secret` 和 `data/.owner_key`，重建容器时从同一目录读取。
+1. 将 [compose.yaml](compose.yaml) 保存到服务器，在文件中设置 `PUBLIC_ORIGIN`（如 `https://mcp.example.com`）和 `volumes.source`。按 [运维指南](docs/production.md#1-首次部署) 准备数据目录。
+2. 执行以下命令启动服务：
 
 ```sh
 docker compose up -d --wait
 ```
 
-3. 在宿主机 Nginx 为域名配置证书并代理到 `127.0.0.1:8787`。配置示例见 [remote-command.conf](deploy/nginx/remote-command.conf)。用 `data/.owner_key` 中的密钥登录域名下的 `/manage`。
+3. 首次启动时，Gateway 会自动创建管理员账号 `admin` 及 **8 位随机密码**，同时打印到控制台并写入 `data/logs/YYYYMMDD-HHmm.log`（按大小自动分段存储，可通过 `LOG_DIR`、`LOG_MAX_BYTES`、`LOG_MAX_FILES` 调整）：
+
+```sh
+docker compose logs gateway | grep "username=admin"
+```
+
+4. 在宿主机 Nginx 为域名配置证书并代理到 `127.0.0.1:8787`。配置示例见 [remote-command.conf](deploy/nginx/remote-command.conf)。使用 `admin` 和初始密码登录域名下的 `/manage`。
+
+> [!IMPORTANT]
+> 若宿主机 Nginx（如宝塔面板）包含 `location ~ \.well-known` 静态目录规则，会拦截 OAuth 自动发现请求返回 404。请增加优先前缀匹配，将 `/.well-known/oauth-` 转发给 Gateway：
+> ```nginx
+> location ^~ /.well-known/acme-challenge/ { allow all; }
+> location ^~ /.well-known/oauth- {
+>     proxy_pass http://127.0.0.1:8787;
+>     proxy_http_version 1.1;
+>     proxy_set_header Host $host;
+>     proxy_set_header X-Forwarded-Proto $scheme;
+>     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+> }
+> ```
 
 ---
 
 ### 第二步：在目标电脑启动 Agent
 
-> **前置条件**：目标电脑（Windows / macOS / Linux）已安装 **Node.js 24–26**。
+直接在目标电脑终端运行 Gateway 自托管的一键安装启动命令（自动检测/下载便携版 Node.js 24、下载同版本 Agent 并预设 Gateway 地址）：
 
-从 [GitHub Releases](https://github.com/91270/Remote.Command/releases) 下载与 Gateway 同版本的 Agent 包，然后启动。
+- **Windows (PowerShell)**：
+  ```powershell
+  irm https://mcp.example.com/install.ps1 | iex
+  ```
+- **macOS / Linux (Bash)**：
+  ```sh
+  curl -fsSL https://mcp.example.com/install.sh | bash
+  ```
+
+> 如需自定义工作区目录或权限，可传入参数（如 `curl -fsSL https://mcp.example.com/install.sh | bash -s -- --workspace /path/to/dir --allow read,write`）；首次运行默认使用当前工作目录与只读权限（`read`），随后自动打开浏览器完成设备配对（无桌面环境可追加 `--no-browser`）。
+
+<details>
+<summary>手动离线安装方式（已安装 Node.js 24–26 时）</summary>
+
+从 [GitHub Releases](https://github.com/91270/Remote.Command/releases) 下载 `remote-command-0.5.3.tgz` 后运行：
 
 ```sh
-npx --yes --ignore-scripts --package=./remote-command-0.5.0.tgz remote-command remote
+npx --yes --ignore-scripts --package=./remote-command-0.5.3.tgz remote-command remote
 ```
 
-按交互提示完成配对：
-1. **填写配置**：输入 Gateway 的 HTTPS 地址（如 `https://mcp.example.com`），选择允许访问的工作区目录与权限（直接回车默认当前目录 + 只读权限）。
-2. **浏览器授权**：在自动打开的管理页核对设备名与配对码并批准（无桌面环境可追加 `--no-browser`，手动复制终端链接到其他设备打开）。
-3. **完成连接**：在管理页确认设备已显示在线。默认配置是 `~/.remote-command/agent.json`，凭证位于 `~/.remote-command/device/identity.json`。后续运行同一命令会读取已保存的配置和凭证。
+</details>
 
 > [!TIP]
 > 最小化 Debian 环境需安装 `procps`。使用 Markdown 转 PDF 功能需本机安装 Chrome 或 Chromium。
 
 ---
 
-### 第三步：接入 ChatGPT 网页端
+### 第三步：接入 ChatGPT / Codex
 
-1. 在支持自定义 MCP 的 ChatGPT 账号或工作区中，添加 MCP Server URL：`https://mcp.example.com/mcp`（参考 [OpenAI 自定义 MCP 指南](https://developers.openai.com/api/docs/guides/custom-mcp-server)）。
-2. 认证方式选择 **OAuth**，填入 Compose 中的 `OAUTH_CLIENT_ID` 和 `data/.oauth_client_secret` 中的密钥。
-   - 若 ChatGPT 页面显示的回调地址与 Compose 默认值不同，将完整回调地址写入 `OAUTH_REDIRECT_URIS` 并执行以下命令。
-     ```sh
-     docker compose up -d --wait
-     ```
-3. 授权跳转到你的 Gateway 域名时，输入 `data/.owner_key` 中的密钥完成登录授权。
-4. 在对话中先让 ChatGPT 调用 `list_devices` 查看设备，再通过 `select_device` 或工具参数 `device_id` 指定目标。只有一台设备在线时会自动选中。
+1. 在支持自定义 MCP 的 ChatGPT 网页端或 Codex 中，添加 MCP Server URL：`https://mcp.example.com/mcp`。
+2. 认证方式选择 **OAuth**。客户端会自动发现 `/.well-known/oauth-protected-resource/mcp` 与 `/.well-known/oauth-authorization-server`，并通过 `/oauth/register` 自动完成动态客户端注册（DCR）与配置回填，**无需手动填写 Client ID、Client Secret 或回调地址**（同时兼容 ChatGPT 网页端与 Codex 本地回环回调）。
+3. 跳转到 Gateway 授权页时，使用管理员账号（`admin`）与密码登录并确认授权。
+4. 在对话中先调用 `list_devices` 查看设备，再通过 `select_device` 或工具参数 `device_id` 指定目标。只有一台设备在线时会自动选中。
 
 ---
 
@@ -90,10 +116,10 @@ npx --yes --ignore-scripts --package=./remote-command-0.5.0.tgz remote-command r
 
 ```sh
 # 1. 查看待审批调用及完整参数
-npx --yes --ignore-scripts --package=/path/to/remote-command-0.5.0.tgz remote-command agent approvals ~/.remote-command/agent.json
+npx --yes --ignore-scripts --package=/path/to/remote-command-0.5.3.tgz remote-command agent approvals ~/.remote-command/agent.json
 
 # 2. 批准或拒绝（将 PASTE_CALL_ID_HERE 替换为实际的 call_id）
-npx --yes --ignore-scripts --package=/path/to/remote-command-0.5.0.tgz remote-command agent decide ~/.remote-command/agent.json PASTE_CALL_ID_HERE approve
+npx --yes --ignore-scripts --package=/path/to/remote-command-0.5.3.tgz remote-command agent decide ~/.remote-command/agent.json PASTE_CALL_ID_HERE approve
 # 拒绝则将 approve 改为 deny
 ```
 

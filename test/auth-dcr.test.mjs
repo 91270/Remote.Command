@@ -8,6 +8,7 @@ import { once } from 'node:events';
 import { RotatingLogger } from '../dist/logger.js';
 import { Store } from '../dist/store.js';
 import { OAuth } from '../dist/oauth.js';
+import { Installer } from '../dist/installer.js';
 import { hash, secret } from '../dist/protocol.js';
 
 test('RotatingLogger splits log files by size using YYYYMMDD-HHmm.log format', async () => {
@@ -199,5 +200,36 @@ test('OAuth DCR allows loopback redirect_uris from Codex/CLI even when Gateway o
     await new Promise(resolve => server.close(resolve));
     store.db.close();
     await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect/stream', async () => {
+  const origin = 'https://mcp.example.com';
+  const installer = new Installer(origin);
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, origin);
+    if (await installer.route(req, res, url)) return;
+    res.writeHead(404).end();
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const localBase = 'http://127.0.0.1:' + server.address().port;
+  try {
+    const shRes = await fetch(localBase + '/install.sh');
+    assert.equal(shRes.status, 200);
+    const sh = await shRes.text();
+    assert.match(sh, /ORIGIN="https:\/\/mcp\.example\.com"/);
+    assert.match(sh, /--gateway "\$\{ORIGIN\}" --yes/);
+
+    const psRes = await fetch(localBase + '/install.ps1');
+    assert.equal(psRes.status, 200);
+    const ps = await psRes.text();
+    assert.match(ps, /\$Origin = 'https:\/\/mcp\.example\.com'/);
+    assert.match(ps, /--gateway \$Origin --yes/);
+
+    const tgzRes = await fetch(localBase + '/install/agent.tgz', { redirect: 'manual' });
+    assert.ok(tgzRes.status === 200 || tgzRes.status === 302);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
   }
 });

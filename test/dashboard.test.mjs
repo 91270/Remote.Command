@@ -45,7 +45,8 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /<title>Remote\.Command · 控制台<\/title>/);
-    assert.match(html, /npx --yes --ignore-scripts --package=https:\/\/github\.com\/91270\/Remote\.Command\/releases\/download\/v[\d.]+\/remote-command-[\d.]+\.tgz remote-command remote/);
+    assert.match(html, /id="device-start-ps"/);
+    assert.match(html, /id="device-start-sh"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     assert.equal((await request('/assets/dashboard.js')).status, 200);
     assert.equal((await request('/api/overview')).status, 401);

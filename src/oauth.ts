@@ -271,19 +271,46 @@ export class OAuth {
       const clientLabel = escapeHtml(client.clientName || client.clientId);
       const rawRedirectOrigin = new URL(redirectUri).origin;
       const redirectOrigin = escapeHtml(rawRedirectOrigin);
-      const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Remote.Command authorization</title>
-<h1>Authorize Remote.Command</h1>
-<p>Client <strong>${clientLabel}</strong> wants to access your paired devices and redirect to <code>${redirectOrigin}</code>. Changes and commands still require confirmation on the device.</p>
-<form method="post" action="/oauth/authorize">${inputs}
-<label>Username <input name="username" type="text" value="admin" required autocomplete="username"></label>
-<label>Password <input name="password" type="password" required autocomplete="current-password"></label>
-<button>Authorize</button></form>`;
+      const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Remote.Command · 授权连接</title>
+  <link rel="stylesheet" href="/manage/assets/dashboard.css">
+</head>
+<body>
+  <section class="login-view">
+    <div class="login-intro">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote.Command</span></div>
+      <h1>授权外部<br>MCP 客户端</h1>
+      <p>允许客户端通过自建 Gateway 请求已配对设备工具。所有写入、配置修改与命令执行仍需在设备端本地确认。</p>
+      <div class="connection-map" aria-label="外部客户端连接自建 Gateway，Gateway 连接设备">
+        <span>${clientLabel}</span><i aria-hidden="true"></i><span>Gateway</span><i aria-hidden="true"></i><span>设备</span>
+      </div>
+    </div>
+    <div class="login-main">
+      <form class="login-card" method="post" action="/oauth/authorize">
+        ${inputs}
+        <h2>授权连接</h2>
+        <p>客户端 <strong>${clientLabel}</strong> 请求访问权限，授权后将回调至 <code>${redirectOrigin}</code>。</p>
+        <label for="auth-username">管理员账号</label>
+        <input id="auth-username" name="username" type="text" value="admin" required autocomplete="username">
+        <label for="auth-password">密码</label>
+        <input id="auth-password" name="password" type="password" required autocomplete="current-password">
+        <button type="submit" class="primary">确认授权</button>
+      </form>
+    </div>
+  </section>
+</body>
+</html>`;
       // A browser form POST from a no-referrer page would send Origin: null.
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'strict-origin',
-        'Content-Security-Policy': `default-src 'none'; form-action 'self' ${rawRedirectOrigin}; frame-ancestors 'none'; base-uri 'none'`
+        'Content-Security-Policy': `default-src 'none'; style-src 'self'; form-action 'self' ${rawRedirectOrigin}; frame-ancestors 'none'; base-uri 'none'`
       }).end(html);
       return;
     }

@@ -18,10 +18,10 @@ const stem = `${manifest.name}-${manifest.version}`;
 const stage = await mkdtemp(join(tmpdir(), 'rcm-release-'));
 const directory = join(stage, stem);
 const releases = join(root, 'releases');
-const sourceFiles = ['.dockerignore', '.npmrc', 'Dockerfile', 'compose.yaml', 'package.json', 'tsconfig.json', 'README.md',
-  'scripts/backup.mjs', 'docs/production.md', 'docs/verification.md', 'src', 'web', 'deploy/gateway',
-  'deploy/nginx/remote-command.conf',
-  'vendor/desktop-commander-full/catalog.json', 'vendor/desktop-commander-full/LICENSE'];
+const sourceFiles = ['.dockerignore', '.npmrc', 'Dockerfile', 'compose.yaml', 'package.json', 'package-lock.json',
+  'tsconfig.json', 'agent.example.json', 'README.md', 'scripts/backup.mjs', 'scripts/package-client.mjs',
+  'docs/production.md', 'docs/verification.md', 'src', 'web', 'deploy/gateway',
+  'deploy/nginx/remote-command.conf', 'vendor'];
 
 async function stageEntry(path) {
   const from = join(root, path), to = join(directory, path);

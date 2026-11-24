@@ -66,7 +66,8 @@ async function showApp(session) {
   byId('app-view').hidden = false;
   const gateway = session.origin || location.origin;
   byId('gateway-host').textContent = new URL(gateway).host;
-  byId('device-gateway-url').textContent = gateway;
+  byId('device-start-ps').textContent = 'irm ' + gateway + '/install.ps1 | iex';
+  byId('device-start-sh').textContent = 'curl -fsSL ' + gateway + '/install.sh | bash';
   const mcpUrl = session.mcpUrl || location.origin + '/mcp';
   byId('mcp-url').textContent = mcpUrl;
   byId('overview-mcp-url').textContent = mcpUrl;
@@ -357,8 +358,8 @@ byId('lookup-device').addEventListener('click', () => act(lookupDevice));
 byId('verify-form').addEventListener('submit', event => { event.preventDefault(); act(() => verifyDevice(true)); });
 byId('deny-device').addEventListener('click', () => act(() => verifyDevice(false)));
 byId('new-device').addEventListener('click', () => byId('start-device-dialog').showModal());
-byId('copy-device-start').addEventListener('click', () => act(() => copy('device-start-command')));
-byId('copy-gateway').addEventListener('click', () => act(() => copy('device-gateway-url')));
+byId('copy-device-ps').addEventListener('click', () => act(() => copy('device-start-ps')));
+byId('copy-device-sh').addEventListener('click', () => act(() => copy('device-start-sh')));
 byId('start-enter-code').addEventListener('click', () => {
   byId('start-device-dialog').close();
   openVerification();
