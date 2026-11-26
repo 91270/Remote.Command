@@ -1,36 +1,171 @@
 'use strict';
+
 const byId = id => document.getElementById(id);
+const THEME_KEY = 'rcm_theme';
+const FREE_QUOTA = 10000;
 const terminalStates = new Set(['succeeded', 'failed', 'denied', 'cancelled', 'timed_out', 'interrupted']);
-const labels = { queued: '排队中', dispatched: '已派发', awaiting_approval: '待本机确认', running: '运行中', succeeded: '已完成', failed: '失败', denied: '已拒绝', cancelled: '已取消', timed_out: '已超时', interrupted: '已中断' };
-const capabilityNames = { read: '读取', write: '写入', exec: '命令' };
-const platformNames = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
-const platformMarks = { darwin: 'MAC', win32: 'WIN', linux: 'LNX' };
-const panels = {
-  devices: ['设备', '连接和管理可供 ChatGPT 使用的工作设备。'],
-  tasks: ['任务', '跟踪远程调用和设备端确认。'],
-  audit: ['审计', '核查 Gateway 记录的操作。'],
-  connect: ['接入 ChatGPT', '配置 MCP Server 并授权访问设备。']
+const labels = {
+  queued: '排队中', dispatched: '已派发', awaiting_approval: '待本机确认', running: '运行中',
+  succeeded: '已完成', failed: '失败', denied: '已拒绝', cancelled: '已取消', timed_out: '已超时', interrupted: '已中断'
 };
-let csrf = '', devices = [], auditRecords = [], activePanel = 'devices', currentTask = '', refreshing = false;
+const capabilityNames = { read: '读取', write: '写入', exec: '命令' };
+const approvalModeLabels = {
+  client: '信任客户端',
+  'exec-only': '仅命令二次确认',
+  strict: '写与命令二次确认'
+};
+const platformNames = { darwin: 'macOS', win32: 'Windows', linux: 'Linux', android: 'Android' };
+const panels = {
+  devices: ['设备', '通过 Remote MCP 让 AI 客户端安全访问你的电脑。'],
+  usage: ['用量', '查看本月工具调用额度与近 6 个月趋势。'],
+  plan: ['套餐与计费', '管理 Free（10,000 次/月）与 Pro（Unlimited）套餐权益。'],
+  activity: ['任务与审计', '跟踪远程工具调用、本机审批与安全审计记录。'],
+  settings: ['设置', '管理账号资料、外观主题与外部 OAuth 授权。'],
+  'admin-overview': ['全站管理', '管理员专属全站运营与安全治理视图。']
+};
+
+let csrf = '';
+let currentSession = null;
+let devices = [];
+let auditRecords = [];
+let oauthClients = [];
+let activePanel = 'devices';
+let activeActivity = 'tasks';
+let activePromptCat = 'inspect';
+const promptTemplates = {
+  inspect: [
+    {
+      title: '检查在线设备与权限',
+      safety: '只读',
+      readOnly: true,
+      prompt: '请调用 Remote.Command 的 who_am_i 和 list_devices，列出当前账号、在线设备及可用权限，不要修改任何文件或执行命令。'
+    },
+    {
+      title: '扫描工作区并总结结构',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 先选定我的在线设备，再读取工作区目录结构并总结项目技术栈与核心文件，保持只读不作任何修改。'
+    },
+    {
+      title: '全文检索关键词或 TODO',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 的搜索工具在工作区中查找所有 "TODO" 或 "FIXME"，按文件和行号汇总成清单，不要改动代码。'
+    }
+  ],
+  files: [
+    {
+      title: '排查大文件与清理清单',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 检查工作区目录大小与占用较高的临时或冗余文件，先整理可清理清单和风险说明等我确认，未确认前不要删除或移动文件。'
+    },
+    {
+      title: '梳理文件命名与目录规范',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 只读浏览工作区文件名与目录层级，先输出结构重命名对照表与迁移方案供我审核，不要直接写文件。'
+    }
+  ],
+  debug: [
+    {
+      title: '日志与源码联动排错',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 读取工作区最近的报错日志与相关源码文件，定位根因后先向我解释问题并给出最小修复方案，先不要修改文件。'
+    },
+    {
+      title: '比对两份配置文件差异',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 读取两份配置文件并逐项对比差异与潜在风险，只输出对比分析报告，不要写入任何配置。'
+    }
+  ],
+  ops: [
+    {
+      title: '检查磁盘、内存与进程状态',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 只读查看目标设备的磁盘剩余空间、内存占用与当前运行进程概况，汇总潜在异常，不要执行重启或终止操作。'
+    },
+    {
+      title: '排查最近日志尾部报错',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 读取工作区日志目录中最新日志文件末尾 100 行，归纳错误或告警原因，保持只读，不要更改服务配置。'
+    }
+  ]
+};
+let currentTask = '';
+let refreshing = false;
 let verifiedCode = '';
+let watchOnlineDeviceId = '';
+let watchOnlineBaselineCount = 0;
+let watchOnlineTimer = null;
+let noticeTimer = null;
+let pendingOnlineDeviceName = '';
+let pendingOnlineBaselineIds = new Set();
+
+// --- Theme Management (Light / Dark / System) ---
+function applyTheme(mode) {
+  if (mode === 'light' || mode === 'dark') {
+    document.documentElement.setAttribute('data-theme', mode);
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  document.querySelectorAll('.theme-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.themeChoice === mode);
+  });
+}
+
+function getTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return saved === 'light' || saved === 'dark' ? saved : 'system';
+}
+
+applyTheme(getTheme());
+
+// --- DOM Helpers ---
 function node(tag, className, text) {
-  const element = document.createElement(tag);
-  if (className) element.className = className;
-  if (text !== undefined) element.textContent = text;
-  return element;
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
 }
+
 function button(label, className, action) {
-  const element = node('button', className, label);
-  element.type = 'button';
-  element.addEventListener('click', () => act(action));
-  return element;
+  const el = node('button', className, label);
+  el.type = 'button';
+  el.addEventListener('click', () => act(action));
+  return el;
 }
-function notice(message, failed = false) {
-  const element = byId('notice');
-  element.textContent = message;
-  element.className = 'notice' + (failed ? ' error' : '');
-  element.hidden = false;
+
+function clearNoticeTimer() {
+  if (noticeTimer) {
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
 }
+
+function notice(message, failed = false, options = {}) {
+  const { persist = false, autoHideMs = 5000 } = options;
+  clearNoticeTimer();
+  if (!persist) {
+    pendingOnlineDeviceName = '';
+    pendingOnlineBaselineIds.clear();
+  }
+  const el = byId('notice');
+  el.textContent = message;
+  el.className = 'notice' + (failed ? ' error' : '');
+  el.hidden = false;
+  if (!failed && !persist && autoHideMs > 0) {
+    noticeTimer = setTimeout(() => {
+      el.hidden = true;
+      noticeTimer = null;
+    }, autoHideMs);
+  }
+}
+
 async function api(path, data) {
   const options = { credentials: 'same-origin', headers: {} };
   if (data !== undefined) {
@@ -47,31 +182,135 @@ async function api(path, data) {
   }
   return result;
 }
+
 async function act(action) {
   try { await action(); }
   catch (error) { notice(error.message, true); }
 }
+
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未连接';
+}
+
+function relativeTime(value) {
+  if (!value) return '从未连接';
+  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (diffSec < 60) return '刚刚在线';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  return `${Math.floor(diffSec / 86400)} 天前`;
+}
+
+function relativeActivityTime(value) {
+  if (!value) return '暂无记录';
+  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (diffSec < 60) return '刚刚';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  return `${Math.floor(diffSec / 86400)} 天前`;
+}
+
+function clientInitials(label) {
+  return String(label || '').replace(/[^A-Za-z0-9\u4e00-\u9fa5]/g, '').slice(0, 2).toUpperCase() || 'MC';
+}
+
+function nextMonthResetLabel() {
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const daysLeft = Math.max(1, Math.ceil((next.getTime() - now.getTime()) / 86400000));
+  return { label: `${next.getUTCMonth() + 1}月1日`, daysLeft };
+}
+
+function statePill(state) {
+  return node('span', 'pill ' + state, labels[state] || state);
+}
+
+function detectOS() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  if (ua.includes('win')) return 'windows';
+  if (ua.includes('mac')) return 'macos';
+  return 'linux';
+}
+
+async function copyText(text, label = '已复制到剪贴板。') {
+  if (!text) return;
+  await navigator.clipboard.writeText(text);
+  notice(label);
+}
+
+async function copyElement(id, label) {
+  const el = byId(id);
+  if (!el) return;
+  await copyText(el.textContent, label);
+}
+
+// --- Auth & App Shell ---
 function showLogin() {
+  stopOnlineWatch();
+  clearNoticeTimer();
+  pendingOnlineDeviceName = '';
+  pendingOnlineBaselineIds.clear();
   csrf = '';
+  currentSession = null;
   byId('notice').hidden = true;
-  byId('login-username').value = 'admin';
-  byId('login-password').value = '';
+  byId('login-error').textContent = '';
+  const boot = byId('auth-boot');
+  if (boot) boot.hidden = true;
   byId('app-view').hidden = true;
   byId('login-view').hidden = false;
-  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+  document.querySelectorAll('dialog[open]').forEach(d => d.close());
+  const googleBtn = byId('google-login-btn');
+  const loginHint = byId('login-hint');
+  if (googleBtn) {
+    const returnTo = location.pathname + (location.search || '');
+    googleBtn.href = '/auth/google/start?return_to=' + encodeURIComponent(returnTo);
+  }
+  fetch('/manage/api/auth-config', { credentials: 'same-origin' })
+    .then(r => (r.ok ? r.json() : null))
+    .then(cfg => {
+      if (!cfg || !loginHint) return;
+      if (!cfg.initialized) {
+        loginHint.textContent = '使用 Google 账号安全登录（全新部署的首个 Google 用户将自动成为管理员）。';
+      } else if (cfg.registrationMode === 'closed') {
+        loginHint.textContent = '使用已授权的 Google 账号登录（当前已关闭新用户注册）。';
+      } else if (cfg.registrationMode === 'invite_only') {
+        loginHint.textContent = '使用 Google 账号安全登录（新用户需携带管理员邀请码激活）。';
+      } else {
+        loginHint.textContent = '使用 Google 账号安全登录或自动注册。';
+      }
+    })
+    .catch(() => {});
 }
+
 async function showApp(session) {
   csrf = session.csrf;
+  currentSession = session;
+  const boot = byId('auth-boot');
+  if (boot) boot.hidden = true;
   byId('login-view').hidden = true;
   byId('app-view').hidden = false;
+
+  const displayName = session.displayName || session.email || session.username || 'User';
+  const initials = displayName.replace(/[^A-Za-z0-9\u4e00-\u9fa5]/g, '').slice(0, 2).toUpperCase() || 'U';
+  byId('sidebar-avatar').textContent = initials;
+  byId('sidebar-user').textContent = session.email || session.username || displayName;
+  byId('sidebar-role').textContent = (session.plan === 'pro' ? 'Pro' : 'Free') + (session.role === 'admin' ? ' · Admin' : '');
+  byId('settings-avatar').textContent = initials;
+  byId('settings-email').textContent = session.email || session.username || displayName;
+  byId('settings-meta').textContent = `角色：${session.role === 'admin' ? '管理员' : '普通用户'} · 当前套餐：${session.plan === 'pro' ? 'Pro (Unlimited)' : 'Free (10,000/月)'}`;
+  byId('admin-nav-group').hidden = session.role !== 'admin';
+
   const gateway = session.origin || location.origin;
-  byId('gateway-host').textContent = new URL(gateway).host;
   byId('device-start-ps').textContent = 'irm ' + gateway + '/install.ps1 | iex';
   byId('device-start-sh').textContent = 'curl -fsSL ' + gateway + '/install.sh | bash';
   const mcpUrl = session.mcpUrl || location.origin + '/mcp';
   byId('mcp-url').textContent = mcpUrl;
   byId('overview-mcp-url').textContent = mcpUrl;
+
+  applyTheme(getTheme());
+  renderPromptLibrary();
   await refresh();
+
   const query = new URLSearchParams(location.search);
   const code = query.get('user_code');
   if (code && /^[A-Za-z0-9-]{4,32}$/.test(code)) {
@@ -80,290 +319,701 @@ async function showApp(session) {
     history.replaceState(null, '', location.pathname + (query.size ? '?' + query.toString() : ''));
   }
 }
-function time(value) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '尚未连接';
-}
-function stateTag(state) {
-  return node('span', 'status ' + state, labels[state] || state);
-}
-async function confirmAction(title, description, name) {
-  const dialog = byId('confirm-dialog');
-  byId('confirm-title').textContent = title;
-  byId('confirm-description').textContent = description;
-  byId('rename-value').hidden = name === undefined;
-  byId('rename-label').hidden = name === undefined;
-  byId('rename-value').value = name || '';
-  dialog.returnValue = '';
-  dialog.showModal();
-  return new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm' ? { name: byId('rename-value').value.trim() } : null), { once: true }));
-}
-function renderDevices() {
-  const grid = byId('devices');
-  const query = byId('device-search').value.trim().toLocaleLowerCase();
-  const filter = byId('device-status').value;
-  const filtered = devices.filter(device => {
-    const state = device.revoked ? 'revoked' : device.online ? 'online' : 'offline';
-    return (!filter || state === filter) && (device.name.toLocaleLowerCase().includes(query) || device.id.includes(query));
+
+function switchPanel(name) {
+  if (!panels[name]) return;
+  activePanel = name;
+  byId('page-title').textContent = panels[name][0];
+  byId('page-description').textContent = panels[name][1];
+  document.querySelectorAll('.panel').forEach(panel => {
+    panel.hidden = panel.id !== 'panel-' + name;
   });
-  byId('device-filters').hidden = devices.length === 0;
-  byId('device-count').textContent = devices.length ? '显示 ' + filtered.length + ' 台，共 ' + devices.length + ' 台' : '';
-  grid.replaceChildren();
-  if (!filtered.length) {
-    const empty = node('div', 'empty');
-    if (devices.length) empty.append(node('h3', '', '没有符合条件的设备'));
-    else empty.append(node('h3', '', '连接第一台设备'), node('p', '', '在工作设备终端启动客户端，使用浏览器完成配对。'),
-      button('查看启动方式', 'secondary', () => byId('start-device-dialog').showModal()));
-    grid.append(empty);
-    return;
-  }
-  for (const device of filtered) {
-    const card = node('article', 'device');
-    const top = node('div', 'device-top');
-    const status = device.revoked ? '已撤销' : device.online ? '在线' : '离线';
-    const identity = node('div', 'device-identity');
-    const deviceName = node('div');
-    deviceName.append(node('h3', '', device.name), node('p', 'device-platform', platformNames[device.platform] || '等待首次连接'));
-    identity.append(node('span', 'device-icon', platformMarks[device.platform] || 'DEV'), deviceName);
-    top.append(identity, node('span', 'status ' + (device.revoked ? 'revoked' : device.online ? 'online' : 'offline'), status));
-    card.append(top);
-    const permissions = node('div', 'device-capabilities');
-    for (const capability of device.capabilities) permissions.append(node('span', 'capability', capabilityNames[capability] || capability));
-    card.append(permissions, node('code', 'device-id', device.id), node('p', 'subtle', '最近连接 ' + time(device.lastSeen)));
-    const actions = node('div', 'device-actions');
-    actions.append(button('查看任务', 'secondary', async () => {
-      byId('task-device').value = device.id;
-      byId('task-status').value = '';
-      switchPanel('tasks');
-      await refreshTasks();
-    }));
-    actions.append(button('复制 ID', 'text-button', () => copyText(device.id)));
-    if (!device.revoked) {
-      actions.append(button('重命名', 'text-button', async () => {
-        const answer = await confirmAction('重命名设备', '修改控制台和对话中显示的设备名称。', device.name);
-        if (!answer) return;
-        await api('devices/' + device.id + '/rename', answer);
-        await refresh();
-      }));
-      actions.append(button('撤销', 'text-button danger', async () => {
-        if (!await confirmAction('撤销设备授权', '设备再次连接时停止接收任务。已经在离线设备上运行的进程需要在本机检查。')) return;
-        await api('devices/' + device.id + '/revoke', {});
-        notice('设备授权已撤销。');
-        await refresh();
-      }));
-    }
-    card.append(actions);
-    grid.append(card);
-  }
-}
-async function refreshTasks() {
-  const selected = byId('task-device').value;
-  const status = byId('task-status').value;
-  const { tasks } = await api('tasks' + (selected ? '?device=' + encodeURIComponent(selected) : ''));
-  if (selected !== byId('task-device').value || status !== byId('task-status').value) return;
-  const visible = tasks.filter(task => !status || (status === 'active' ? !terminalStates.has(task.status) : task.status === status));
-  const body = byId('tasks');
-  body.replaceChildren();
-  if (!visible.length) {
-    const row = node('tr'), cell = node('td', 'muted', selected || status ? '没有符合条件的任务。' : '暂无任务。通过 ChatGPT 调用设备工具后，任务会显示在这里。');
-    cell.colSpan = 5;
-    row.append(cell);
-    body.append(row);
-  }
-  for (const task of visible) {
-    const row = node('tr');
-    const operation = node('td');
-    operation.append(node('code', '', task.toolName || task.operation));
-    row.append(operation, node('td', 'muted', devices.find(device => device.id === task.device)?.name || task.device));
-    const state = node('td');
-    state.append(stateTag(task.status));
-    const action = node('td');
-    action.append(button('查看 →', 'text-button', () => openTask(task.id)));
-    row.append(state, node('td', 'subtle', time(task.createdAt)), action);
-    body.append(row);
-  }
-}
-async function refreshRecentTasks() {
-  const { tasks } = await api('tasks');
-  const list = byId('recent-tasks');
-  if (list.contains(document.activeElement)) return;
-  list.replaceChildren();
-  if (!tasks.length) list.append(node('p', 'muted', '开始调用设备工具后，这里会显示最近的结果。'));
-  for (const task of tasks.slice(0, 3)) {
-    const entry = node('div', 'recent-task');
-    const data = node('div');
-    data.append(node('code', 'recent-task-name', task.toolName || task.operation), stateTag(task.status));
-    entry.append(data, button('查看', 'text-button', () => openTask(task.id)));
-    list.append(entry);
-  }
-}
-async function refreshAudit() {
-  const { records } = await api('audit');
-  auditRecords = records;
-  renderAudit();
-}
-function renderAudit() {
-  const body = byId('audit');
-  body.replaceChildren();
-  const query = byId('audit-search').value.trim().toLowerCase();
-  const records = auditRecords.filter(record => !query || (record.event + ' ' + JSON.stringify(record.details)).toLowerCase().includes(query));
-  if (!records.length) {
-    const row = node('tr'), cell = node('td', 'muted', query ? '没有符合条件的日志。' : '暂无审计记录。');
-    cell.colSpan = 3;
-    row.append(cell);
-    body.append(row);
-  }
-  for (const record of records) {
-    const row = node('tr');
-    row.append(node('td', 'subtle', time(record.at)), node('td', '', record.event), node('td', 'details', JSON.stringify(record.details)));
-    body.append(row);
-  }
-}
-async function refresh() {
-  if (refreshing || !csrf) return;
-  refreshing = true;
-  try {
-    const overview = await api('overview');
-    devices = overview.devices;
-    byId('stat-online').textContent = devices.filter(device => device.online).length;
-    byId('stat-paired').textContent = devices.filter(device => !device.revoked).length + ' 台设备已配对';
-    byId('stat-active').textContent = overview.activeTasks + ' 项任务进行中';
-    byId('stat-approval').textContent = overview.taskCounts?.awaiting_approval ?? 0;
-    byId('stat-calls').textContent = overview.totalCalls.toLocaleString('zh-CN');
-    byId('last-refresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    const selection = byId('task-device'), selected = selection.value;
-    selection.replaceChildren(node('option', '', '所有设备'));
-    selection.firstChild.value = '';
-    for (const device of devices) {
-      const option = node('option', '', device.name);
-      option.value = device.id;
-      selection.append(option);
-    }
-    selection.value = selected;
-    if (!byId('devices').contains(document.activeElement)) renderDevices();
-    if (activePanel === 'devices') await refreshRecentTasks();
-    if (activePanel === 'tasks') await refreshTasks();
-    if (activePanel === 'audit') await refreshAudit();
-    if (byId('task-dialog').open && currentTask) await updateTask(currentTask);
-  } finally { refreshing = false; }
-}
-function switchPanel(panel) {
-  activePanel = panel;
-  const [title, description] = panels[panel];
-  byId('page-title').textContent = title;
-  byId('page-description').textContent = description;
-  for (const name of Object.keys(panels)) byId('panel-' + name).hidden = name !== panel;
   document.querySelectorAll('.nav-link').forEach(link => {
-    const active = link.dataset.panel === panel;
+    const active = link.dataset.panel === name;
     link.classList.toggle('active', active);
     if (active) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   });
 }
-async function updateTask(id) {
-  const task = await api('tasks/' + id);
-  if (id !== currentTask) return;
-  byId('task-title').textContent = task.toolName || task.operation;
-  byId('task-detail-status').replaceChildren(stateTag(task.status));
-  byId('task-meta').textContent = (devices.find(device => device.id === task.device)?.name || task.device) + ' · ' + time(task.createdAt);
-  byId('task-id').textContent = id;
-  byId('task-approval').hidden = task.status !== 'awaiting_approval';
-  const content = task.result?.content;
-  const resultText = Array.isArray(content) ? content.map(entry => entry.type === 'text' ? entry.text : '[' + entry.type + ']').join('\n') : '';
-  const output = resultText || task.output || (task.result?.structuredContent ? JSON.stringify(task.result.structuredContent, null, 2) : '')
-    || (terminalStates.has(task.status) ? '设备没有返回文本输出。' : '等待设备返回输出。');
-  if (byId('task-output').textContent !== output) byId('task-output').textContent = output;
-  byId('cancel-task').hidden = terminalStates.has(task.status);
-  byId('cancel-task').disabled = task.cancelRequested;
-  byId('cancel-task').textContent = task.cancelRequested ? '已请求取消' : '请求取消任务';
+
+// --- Quota & Usage Rendering ---
+function renderQuotaAndUsage(totalCalls) {
+  const isPro = currentSession?.plan === 'pro';
+  const { label: resetLabel, daysLeft } = nextMonthResetLabel();
+  const pct = isPro ? 0 : Math.min(100, Math.round((totalCalls / FREE_QUOTA) * 100));
+
+  // Sidebar quota card
+  byId('sidebar-quota-pct').textContent = isPro ? 'Pro' : `${pct}%`;
+  const sFill = byId('sidebar-quota-fill');
+  sFill.style.width = isPro ? '100%' : `${pct}%`;
+  sFill.className = 'quota-fill' + (!isPro && pct >= 100 ? ' full' : !isPro && pct >= 80 ? ' warn' : '');
+  byId('sidebar-quota-text').textContent = isPro
+    ? `${totalCalls.toLocaleString()} 次 · Unlimited`
+    : `${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()} 本月`;
+  byId('sidebar-quota-reset').textContent = isPro ? '无限次工具调用已启用' : `将于 ${resetLabel} 重置`;
+  byId('sidebar-upgrade-btn').hidden = isPro;
+
+  // Global top banner
+  const banner = byId('quota-banner');
+  if (!isPro && pct >= 80) {
+    banner.hidden = false;
+    banner.className = 'quota-banner' + (pct >= 100 ? ' full' : '');
+    byId('quota-banner-text').textContent = pct >= 100
+      ? `本月 ${FREE_QUOTA.toLocaleString()} 次免费工具调用已用完，将于 ${resetLabel} 重置。`
+      : `本月免费工具调用已使用 ${pct}%（${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}），将于 ${resetLabel} 重置。`;
+  } else {
+    banner.hidden = true;
+  }
+
+  // Usage KPI cards
+  byId('usage-month-value').textContent = isPro
+    ? `${totalCalls.toLocaleString()} · Unlimited`
+    : `${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}`;
+  const uFill = byId('usage-quota-fill');
+  uFill.style.width = isPro ? '100%' : `${pct}%`;
+  uFill.className = sFill.className;
+  byId('usage-month-sub').textContent = isPro
+    ? '当前为 Pro 套餐，不限制月度调用次数'
+    : `已使用 ${pct}% · ${resetLabel} 重置（剩余 ${daysLeft} 天）`;
+  const dayOfMonth = Math.max(1, new Date().getUTCDate());
+  byId('usage-daily-avg').textContent = Math.round(totalCalls / dayOfMonth).toLocaleString();
+
+  // Plan cards active state
+  byId('plan-card-free').classList.toggle('active-plan', !isPro);
+  byId('plan-card-pro').classList.toggle('active-plan', isPro);
+  byId('badge-plan-free').hidden = isPro;
+  byId('badge-plan-pro').hidden = !isPro;
+
+  renderUsageChart(totalCalls);
 }
+
+function renderUsageChart(currentMonthCalls) {
+  const wrap = byId('usage-chart');
+  wrap.replaceChildren();
+  const now = new Date();
+  const months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    months.push({ label: `${d.getUTCMonth() + 1}月`, value: i === 0 ? currentMonthCalls : 0 });
+  }
+  const maxVal = Math.max(10, ...months.map(m => m.value));
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'usage-svg');
+  svg.setAttribute('viewBox', '0 0 600 200');
+
+  const padL = 44, padB = 28, padT = 16, chartH = 200 - padT - padB, chartW = 600 - padL - 16;
+  for (let i = 0; i <= 2; i++) {
+    const y = padT + (chartH / 2) * i;
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', String(padL));
+    line.setAttribute('x2', String(600 - 16));
+    line.setAttribute('y1', String(y));
+    line.setAttribute('y2', String(y));
+    svg.appendChild(line);
+
+    const lbl = document.createElementNS(ns, 'text');
+    lbl.setAttribute('x', String(padL - 8));
+    lbl.setAttribute('y', String(y + 4));
+    lbl.setAttribute('text-anchor', 'end');
+    lbl.textContent = String(Math.round(maxVal * (1 - i / 2)));
+    svg.appendChild(lbl);
+  }
+
+  const slotW = chartW / months.length;
+  const barW = Math.min(46, slotW * 0.48);
+  months.forEach((m, idx) => {
+    const h = m.value > 0 ? Math.max(6, (m.value / maxVal) * chartH) : 2;
+    const x = padL + idx * slotW + (slotW - barW) / 2;
+    const y = padT + chartH - h;
+    const rect = document.createElementNS(ns, 'rect');
+    rect.setAttribute('class', 'bar');
+    rect.setAttribute('x', String(x));
+    rect.setAttribute('y', String(y));
+    rect.setAttribute('width', String(barW));
+    rect.setAttribute('height', String(h));
+    svg.appendChild(rect);
+
+    const xText = document.createElementNS(ns, 'text');
+    xText.setAttribute('x', String(x + barW / 2));
+    xText.setAttribute('y', String(200 - 8));
+    xText.setAttribute('text-anchor', 'middle');
+    xText.textContent = m.label;
+    svg.appendChild(xText);
+  });
+
+  wrap.appendChild(svg);
+}
+
+// --- Devices Rendering ---
+function renderDevices() {
+  const container = byId('devices');
+  container.replaceChildren();
+  const activeCount = devices.filter(d => !d.revoked).length;
+  const onlineCount = devices.filter(d => d.online).length;
+  const revokedCount = devices.filter(d => d.revoked).length;
+  const clearRevokedBtn = byId('clear-revoked-devices');
+  if (clearRevokedBtn) clearRevokedBtn.hidden = revokedCount === 0;
+  byId('device-count').textContent = activeCount
+    ? `${onlineCount} 台在线 · 共 ${activeCount} 台已配对设备`
+    : '还没有配对设备，点击右上角「+ 添加设备」开始。';
+  byId('device-filters').hidden = devices.length < 4;
+
+  const query = byId('device-search').value.trim().toLowerCase();
+  const statusFilter = byId('device-status').value;
+  const visible = devices.filter(d => {
+    if (statusFilter === 'online' && !d.online) return false;
+    if (statusFilter === 'offline' && (d.online || d.revoked)) return false;
+    if (statusFilter === 'revoked' && !d.revoked) return false;
+    if (query && !d.name.toLowerCase().includes(query) && !d.id.toLowerCase().includes(query)) return false;
+    return true;
+  });
+
+  if (!visible.length) {
+    container.appendChild(node('div', 'empty-state', devices.length ? '没有匹配的设备。' : '点击「+ 添加设备」，在目标电脑运行一行命令即可连接。'));
+    return;
+  }
+
+  for (const device of visible) {
+    const row = node('div', 'device-row');
+    const main = node('div', 'device-main');
+    main.appendChild(node('span', 'status-dot' + (device.online ? ' online' : '')));
+
+    const info = node('div', 'device-info');
+    const title = node('div', 'device-name');
+    title.appendChild(node('span', '', device.name));
+    if (device.platform) title.appendChild(node('span', 'pill', platformNames[device.platform] || device.platform));
+    title.appendChild(node('span', 'pill ' + (device.revoked ? 'revoked' : device.online ? 'online' : ''), device.revoked ? '已撤销' : device.online ? 'Online' : 'Offline'));
+    info.appendChild(title);
+
+    const capsText = (device.capabilities || []).map(c => capabilityNames[c] || c).join(' · ');
+    const modeValue = approvalModeLabels[device.approvalMode] ? device.approvalMode : 'client';
+    const seenText = device.online ? '当前在线' : `最后在线 ${relativeTime(device.lastSeen)}`;
+    info.appendChild(node('div', 'device-meta', `${seenText} · 权限：${capsText || '只读'} · 审批：${approvalModeLabels[modeValue]}`));
+    main.appendChild(info);
+
+    const actions = node('div', 'device-actions');
+    if (!device.revoked) {
+      const modeSelect = document.createElement('select');
+      modeSelect.className = 'approval-select';
+      modeSelect.setAttribute('aria-label', `${device.name} 本机二次审批策略`);
+      for (const [val, text] of Object.entries(approvalModeLabels)) {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = text;
+        modeSelect.appendChild(opt);
+      }
+      modeSelect.value = modeValue;
+      modeSelect.addEventListener('change', async () => {
+        const nextMode = modeSelect.value;
+        try {
+          await api(`devices/${device.id}/approval-mode`, { approvalMode: nextMode });
+          notice(`已将「${device.name}」审批策略切换为「${approvalModeLabels[nextMode]}」（即时生效）。`);
+          await refresh();
+        } catch (err) {
+          modeSelect.value = modeValue;
+          notice(err.message, true);
+        }
+      });
+      actions.appendChild(modeSelect);
+      if (!device.online) {
+        actions.appendChild(button('重连', 'primary', () => openDeviceDialog({ mode: 'reconnect', device })));
+      }
+      actions.appendChild(button('重命名', 'secondary', async () => {
+        const renamed = await confirmAction('重命名设备', `修改「${device.name}」的显示名称。`, device.name);
+        if (!renamed) return;
+        await api(`devices/${device.id}/rename`, { name: renamed });
+        notice('设备名称已更新。');
+        await refresh();
+      }));
+      actions.appendChild(button(device.online ? '撤销' : '移除', 'danger', async () => {
+        if (!await confirmAction('撤销设备', `确认撤销「${device.name}」？撤销后需重新配对，进行中任务将中断。`)) return;
+        await api(`devices/${device.id}/revoke`, {});
+        notice(`已撤销设备「${device.name}」。`);
+        await refresh();
+      }));
+    } else {
+      actions.appendChild(button('删除记录', 'secondary', async () => {
+        if (!await confirmAction('删除已撤销设备', `确认彻底移除「${device.name}」的已撤销设备记录？保留的历史任务与审计日志不受影响。`)) return;
+        await api(`devices/${device.id}/delete`, {});
+        notice(`已移除设备记录「${device.name}」。`);
+        await refresh();
+      }));
+    }
+    row.append(main, actions);
+    container.appendChild(row);
+  }
+}
+
+// --- 3-Step Add Device & 2-Step Reconnect Dialog (with Auto Online Detection) ---
+function setDialogOS(os) {
+  document.querySelectorAll('.os-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.os === os));
+  byId('os-panel-windows').hidden = os !== 'windows';
+  byId('os-panel-unix').hidden = os === 'windows';
+}
+
+function setDialogStep(stepNum) {
+  byId('step-1').classList.toggle('active', stepNum === 1);
+  byId('step-2').classList.toggle('active', stepNum === 2);
+  byId('step-3').classList.toggle('active', stepNum === 3);
+  byId('step-2-hint').hidden = stepNum < 2;
+}
+
+function stopOnlineWatch() {
+  if (watchOnlineTimer) {
+    clearInterval(watchOnlineTimer);
+    watchOnlineTimer = null;
+  }
+  watchOnlineDeviceId = '';
+}
+
+function startOnlineWatch(targetDeviceId) {
+  stopOnlineWatch();
+  watchOnlineDeviceId = targetDeviceId || '';
+  watchOnlineBaselineCount = devices.filter(d => d.online).length;
+  watchOnlineTimer = setInterval(async () => {
+    const dialog = byId('start-device-dialog');
+    if (!dialog.open || !csrf) {
+      stopOnlineWatch();
+      return;
+    }
+    try {
+      const overview = await api('overview');
+      devices = overview.devices;
+      renderDevices();
+      if (watchOnlineDeviceId) {
+        const target = devices.find(d => d.id === watchOnlineDeviceId);
+        if (target?.online) {
+          stopOnlineWatch();
+          dialog.close();
+          notice(`设备「${target.name}」已重新上线！`);
+        }
+      } else if (devices.filter(d => d.online).length > watchOnlineBaselineCount) {
+        stopOnlineWatch();
+        dialog.close();
+        notice('新设备已成功连接并上线！');
+      }
+    } catch { /* ignore transient poll errors */ }
+  }, 2500);
+}
+
+function openDeviceDialog({ mode = 'add', device = null } = {}) {
+  const isReconnect = mode === 'reconnect' && device;
+  byId('start-device-title').textContent = isReconnect ? `重新连接 ${device.name}` : '连接新设备';
+  byId('start-device-sub').textContent = isReconnect
+    ? `在「${device.name}」的终端运行下方命令即可恢复在线，上线后此窗口会自动关闭。`
+    : '选择目标电脑的操作系统，复制命令在终端运行即可自动配置环境并连接。';
+  byId('step-3-sep').hidden = !!isReconnect;
+  byId('step-3').hidden = !!isReconnect;
+  byId('start-enter-code').hidden = !!isReconnect;
+  byId('other-connect-ways').hidden = !!isReconnect;
+  byId('reconnect-live-pill').hidden = !isReconnect;
+  setDialogStep(1);
+
+  const preferredOs = isReconnect && device.platform === 'win32'
+    ? 'windows'
+    : isReconnect && device.platform === 'darwin'
+      ? 'macos'
+      : isReconnect && device.platform === 'linux'
+        ? 'linux'
+        : detectOS();
+  setDialogOS(preferredOs);
+
+  byId('start-device-dialog').showModal();
+  startOnlineWatch(isReconnect ? device.id : '');
+}
+
+// --- Tasks & Audit ---
+async function refreshTasks() {
+  const devSelect = byId('task-device');
+  const prev = devSelect.value;
+  devSelect.replaceChildren(node('option', '', '全部设备'));
+  devSelect.firstChild.value = '';
+  for (const d of devices) {
+    const opt = node('option', '', d.name);
+    opt.value = d.id;
+    devSelect.appendChild(opt);
+  }
+  devSelect.value = devices.some(d => d.id === prev) ? prev : '';
+
+  const qs = devSelect.value ? '?device=' + encodeURIComponent(devSelect.value) : '';
+  const { tasks } = await api('tasks' + qs);
+  const statusFilter = byId('task-status').value;
+  const filtered = tasks.filter(t => {
+    if (!statusFilter) return true;
+    if (statusFilter === 'active') return !terminalStates.has(t.status);
+    return t.status === statusFilter;
+  });
+
+  const tbody = byId('tasks');
+  tbody.replaceChildren();
+  if (!filtered.length) {
+    const tr = document.createElement('tr');
+    const td = node('td', 'subtle', '暂无匹配的任务记录。');
+    td.colSpan = 5;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const t of filtered) {
+    const tr = document.createElement('tr');
+    const devName = devices.find(d => d.id === t.device)?.name || t.device.slice(0, 8);
+    tr.append(
+      node('td', '', t.toolName || t.operation),
+      node('td', '', devName),
+      (() => { const td = document.createElement('td'); td.appendChild(statePill(t.status)); return td; })(),
+      node('td', 'tabular', formatTime(t.createdAt)),
+      (() => { const td = document.createElement('td'); td.appendChild(button('查看', 'text-button', () => openTask(t.id))); return td; })()
+    );
+    tbody.appendChild(tr);
+  }
+}
+
+function renderAudit() {
+  const query = byId('audit-search').value.trim().toLowerCase();
+  const tbody = byId('audit');
+  tbody.replaceChildren();
+  const rows = auditRecords.filter(r => !query || r.event.toLowerCase().includes(query) || JSON.stringify(r.details).toLowerCase().includes(query));
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = node('td', 'subtle', '暂无审计记录。');
+    td.colSpan = 3;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.append(
+      node('td', 'tabular', formatTime(r.at)),
+      node('td', '', r.event),
+      node('td', '', JSON.stringify(r.details))
+    );
+    tbody.appendChild(tr);
+  }
+}
+
 async function openTask(id) {
   currentTask = id;
   await updateTask(id);
-  if (currentTask === id && !byId('task-dialog').open) byId('task-dialog').showModal();
+  byId('task-dialog').showModal();
 }
-async function copyText(text) {
-  await navigator.clipboard.writeText(text);
-  notice('已复制。');
+
+async function updateTask(id) {
+  const t = await api('tasks/' + id);
+  const statusEl = byId('task-detail-status');
+  statusEl.replaceChildren(statePill(t.status));
+  byId('task-meta').textContent = `${t.toolName || t.operation} · 更新于 ${formatTime(t.updatedAt)}`;
+  byId('task-id').textContent = t.id;
+  byId('task-approval').hidden = t.status !== 'awaiting_approval';
+  byId('task-output').textContent = t.output || (t.result ? JSON.stringify(t.result, null, 2) : '（暂无输出）');
+  byId('cancel-task').hidden = terminalStates.has(t.status);
 }
-const copy = id => copyText(byId(id).textContent);
-byId('login-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const submit = event.submitter;
-  submit.disabled = true;
-  byId('login-error').textContent = '';
-  try {
-    const session = await api('login', {
-      username: byId('login-username').value.trim(),
-      password: byId('login-password').value
-    });
-    byId('login-password').value = '';
-    await showApp(session);
-  } catch (error) { byId('login-error').textContent = error.message; }
-  finally { submit.disabled = false; }
-});
-byId('logout').addEventListener('click', () => act(async () => { await api('logout', {}); showLogin(); }));
-function resetVerification() {
+
+// --- Confirm / Rename Dialog ---
+async function confirmAction(title, description, initialName) {
+  const dialog = byId('confirm-dialog');
+  byId('confirm-title').textContent = title;
+  byId('confirm-description').textContent = description;
+  const renameMode = initialName !== undefined;
+  byId('rename-label').hidden = !renameMode;
+  const input = byId('rename-value');
+  input.hidden = !renameMode;
+  input.value = initialName || '';
+  dialog.showModal();
+  const result = await new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), { once: true }));
+  if (result !== 'confirm') return false;
+  return renameMode ? input.value.trim() : true;
+}
+
+// --- Device Code Verification ---
+function getCodeSlots() {
+  return Array.from(document.querySelectorAll('#verify-code-slots .code-slot'));
+}
+
+function normalizeUserCode(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+}
+
+function syncCodeValue() {
+  const raw = getCodeSlots().map(slot => normalizeUserCode(slot.value)).join('');
+  const formatted = raw.length > 5 ? raw.slice(0, 5) + '-' + raw.slice(5) : raw;
+  byId('verify-code').value = formatted;
+  return { raw, formatted };
+}
+
+function fillCodeSlots(value) {
+  const chars = normalizeUserCode(value).split('');
+  const slots = getCodeSlots();
+  slots.forEach((slot, idx) => {
+    slot.value = chars[idx] || '';
+    slot.classList.toggle('filled', !!slot.value);
+  });
+  return syncCodeValue();
+}
+
+function resetVerificationPreview() {
   verifiedCode = '';
   byId('verify-details').hidden = true;
   byId('verify-actions').hidden = true;
-  byId('verify-error').textContent = '';
 }
-function openVerification(code = '') {
+
+function openVerification(prefill = '') {
+  resetVerificationPreview();
   byId('verify-form').reset();
-  byId('verify-code').value = code;
-  resetVerification();
+  const { raw } = fillCodeSlots(prefill);
+  byId('verify-error').textContent = '';
   byId('verify-dialog').showModal();
-  if (code) void lookupDevice();
+  if (raw.length === 10) {
+    act(lookupDeviceCode);
+  } else {
+    const slots = getCodeSlots();
+    if (slots[0]) slots[0].focus();
+  }
 }
-async function lookupDevice() {
-  const field = byId('verify-code'), submit = byId('lookup-device');
-  if (!field.reportValidity()) return;
-  const code = field.value.trim();
-  resetVerification();
-  submit.disabled = true;
-  try {
-    const pairing = await api('device-preview', { user_code: code });
-    if (field.value.trim() !== code || !byId('verify-dialog').open) return;
-    verifiedCode = code;
-    byId('verify-host').textContent = pairing.deviceName;
-    byId('verify-expiry').textContent = '有效期至 ' + time(pairing.expiresAt);
-    byId('verify-details').hidden = false;
-    byId('verify-actions').hidden = false;
-  } catch (error) { byId('verify-error').textContent = error.message; }
-  finally { submit.disabled = false; }
-}
-async function verifyDevice(approve) {
-  const form = byId('verify-form');
-  if (!form.reportValidity()) return;
-  const data = new FormData(form);
-  const code = String(data.get('user_code')).trim();
-  if (!verifiedCode || verifiedCode !== code) { await lookupDevice(); return; }
-  const name = String(data.get('name') || '').trim();
-  const selected = data.getAll('capabilities');
-  if (approve && !selected.length) {
-    byId('verify-error').textContent = '请选择至少一项设备权限。';
+
+async function lookupDeviceCode() {
+  const { raw, formatted } = syncCodeValue();
+  if (!raw) return;
+  if (raw.length < 10) {
+    resetVerificationPreview();
+    byId('verify-error').textContent = '请输入完整的 10 位配对码。';
     return;
   }
+  byId('verify-error').textContent = '';
   try {
-    const result = await api('device-verify', { user_code: code,
-      ...(name && { name }), capabilities: selected.length ? selected : ['read'], approve });
-    byId('verify-dialog').close();
-    notice(approve ? '已授权设备 ' + result.deviceName + '，等待客户端连接。' : '已拒绝此次设备配对。');
-    await refresh();
-  } catch (error) { byId('verify-error').textContent = error.message; }
+    const info = await api('device-preview', { user_code: formatted });
+    verifiedCode = formatted;
+    byId('verify-host').textContent = info.deviceName;
+    byId('verify-expiry').textContent = '有效期至 ' + formatTime(info.expiresAt);
+    byId('verify-name').value = info.deviceName;
+    byId('verify-details').hidden = false;
+    byId('verify-actions').hidden = false;
+  } catch (err) {
+    resetVerificationPreview();
+    byId('verify-error').textContent = err.message;
+  }
 }
-byId('verify-device').addEventListener('click', () => openVerification());
-byId('verify-code').addEventListener('input', resetVerification);
-byId('lookup-device').addEventListener('click', () => act(lookupDevice));
-byId('verify-form').addEventListener('submit', event => { event.preventDefault(); act(() => verifyDevice(true)); });
-byId('deny-device').addEventListener('click', () => act(() => verifyDevice(false)));
-byId('new-device').addEventListener('click', () => byId('start-device-dialog').showModal());
-byId('copy-device-ps').addEventListener('click', () => act(() => copy('device-start-ps')));
-byId('copy-device-sh').addEventListener('click', () => act(() => copy('device-start-sh')));
-byId('start-enter-code').addEventListener('click', () => {
-  byId('start-device-dialog').close();
-  openVerification();
+
+async function submitDeviceDecision(approve) {
+  if (!verifiedCode) return;
+  const data = new FormData(byId('verify-form'));
+  const caps = data.getAll('capabilities');
+  const name = (data.get('name') || '').toString().trim() || undefined;
+  const approvalMode = (data.get('approvalMode') || 'client').toString();
+  const res = await api('device-verify', { user_code: verifiedCode, name, capabilities: caps.length ? caps : ['read'], approve, approvalMode });
+  byId('verify-dialog').close();
+  if (approve) {
+    pendingOnlineDeviceName = res.deviceName || '';
+    pendingOnlineBaselineIds = new Set(devices.filter(d => !d.revoked && d.online).map(d => d.id));
+    notice(`已授权设备「${res.deviceName}」，等待设备完成上线。`, false, { persist: true });
+  } else {
+    notice(`已拒绝设备「${res.deviceName}」的配对请求。`);
+  }
+  await refresh();
+}
+
+function renderOAuthClients() {
+  const container = byId('oauth-clients');
+  if (!container) return;
+  container.replaceChildren();
+
+  if (!oauthClients.length) {
+    container.appendChild(node('div', 'empty-state', '当前没有活跃的已授权 OAuth 客户端。'));
+    return;
+  }
+
+  for (const client of oauthClients) {
+    const row = node('div', 'device-row');
+    const main = node('div', 'device-main');
+    const label = client.clientName || client.clientId;
+    main.appendChild(node('span', 'client-icon', clientInitials(label)));
+
+    const info = node('div', 'device-info');
+    const title = node('div', 'device-name');
+    title.appendChild(node('span', '', label));
+
+    const origins = Array.isArray(client.redirectOrigins) ? client.redirectOrigins : [];
+    for (const origin of origins.slice(0, 2)) {
+      let hostLabel = origin;
+      try { hostLabel = new URL(origin).host || origin; } catch { /* keep raw origin */ }
+      title.appendChild(node('span', 'pill', hostLabel));
+    }
+    if (origins.length > 2) {
+      title.appendChild(node('span', 'pill', `+${origins.length - 2}`));
+    }
+    title.appendChild(node('span', 'pill online', `${client.activeSessions || 1} 个活跃会话`));
+    info.appendChild(title);
+
+    const authLabel = client.authorizedAt ? formatTime(client.authorizedAt) : '未知';
+    const activeLabel = relativeActivityTime(client.lastActiveAt);
+    const meta = node('div', 'device-meta', `ID: ${client.clientId} · 首次授权 ${authLabel} · 最近活跃 ${activeLabel}`);
+    if (client.lastActiveAt) {
+      meta.title = '最近活跃时间：' + formatTime(client.lastActiveAt);
+    }
+    info.appendChild(meta);
+    main.appendChild(info);
+
+    const actions = node('div', 'device-actions');
+    actions.appendChild(button('撤销', 'danger', async () => {
+      if (!await confirmAction('撤销客户端授权', `确认撤销「${label}」的所有访问与刷新令牌？该客户端需要重新授权，不影响其他已连接客户端。`)) return;
+      await api('oauth/clients/' + encodeURIComponent(client.clientId) + '/revoke', {});
+      notice(`已撤销「${label}」的 OAuth 授权。`);
+      await refreshOAuthClients();
+    }));
+
+    row.append(main, actions);
+    container.appendChild(row);
+  }
+}
+
+async function refreshOAuthClients() {
+  const res = await api('oauth/clients');
+  oauthClients = res.clients || [];
+  renderOAuthClients();
+}
+
+function renderPromptLibrary() {
+  const container = byId('prompt-library');
+  if (!container) return;
+  container.replaceChildren();
+
+  const items = promptTemplates[activePromptCat] || [];
+  for (const item of items) {
+    const card = node('article', 'prompt-card');
+    const head = node('div', 'prompt-card-head');
+    head.append(
+      node('strong', '', item.title),
+      node('span', 'pill' + (item.readOnly ? ' online' : ''), item.safety)
+    );
+    const text = node('p', 'prompt-card-text', item.prompt);
+    const foot = node('div', 'prompt-card-foot');
+    foot.appendChild(button('复制', 'secondary', () => copyText(item.prompt, `已复制「${item.title}」Prompt。`)));
+    card.append(head, text, foot);
+    container.appendChild(card);
+  }
+}
+
+// --- Main Refresh ---
+async function refresh() {
+  if (!csrf || refreshing) return;
+  refreshing = true;
+  try {
+    const overview = await api('overview');
+    devices = overview.devices;
+    renderDevices();
+    if (pendingOnlineDeviceName) {
+      const onlineDevice = devices.find(
+        d => !d.revoked && d.online && d.name === pendingOnlineDeviceName && !pendingOnlineBaselineIds.has(d.id)
+      );
+      if (onlineDevice) {
+        const onlineName = onlineDevice.name;
+        pendingOnlineDeviceName = '';
+        pendingOnlineBaselineIds.clear();
+        notice(`设备「${onlineName}」已成功上线！`, false, { autoHideMs: 4000 });
+      }
+    }
+    renderQuotaAndUsage(overview.totalCalls || 0);
+    byId('last-refresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    if (activePanel === 'activity') {
+      if (activeActivity === 'tasks') await refreshTasks();
+      else {
+        const res = await api('audit');
+        auditRecords = res.records;
+        renderAudit();
+      }
+    } else if (activePanel === 'settings') {
+      await refreshOAuthClients();
+    }
+  } finally {
+    refreshing = false;
+  }
+}
+
+// --- Event Bindings ---
+async function handleLogout() {
+  await api('logout', {});
+  showLogin();
+}
+byId('logout').addEventListener('click', () => act(handleLogout));
+byId('settings-logout').addEventListener('click', () => act(handleLogout));
+byId('profile-trigger').addEventListener('click', () => {
+  switchPanel('settings');
+  act(refresh);
 });
+
+document.querySelectorAll('.nav-link').forEach(link => {
+  link.addEventListener('click', () => {
+    switchPanel(link.dataset.panel);
+    act(refresh);
+  });
+});
+
+document.querySelectorAll('.theme-opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.themeChoice;
+    localStorage.setItem(THEME_KEY, mode);
+    applyTheme(mode);
+  });
+});
+
+document.querySelectorAll('.client-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = byId(btn.dataset.target);
+    if (!target) return;
+    target.hidden = !target.hidden;
+    btn.textContent = target.hidden ? '展开步骤' : '收起';
+  });
+});
+
+document.querySelectorAll('.copy-prompt').forEach(btn => {
+  btn.addEventListener('click', () => act(() => copyElement(
+    btn.dataset.source,
+    btn.dataset.source === 'chatgpt-custom-instructions' ? '已复制推荐自定义指令。' : '已复制 Prompt 示例。'
+  )));
+});
+
+document.querySelectorAll('.prompt-cat').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activePromptCat = btn.dataset.promptCat || 'inspect';
+    document.querySelectorAll('.prompt-cat').forEach(tab => {
+      const selected = tab === btn;
+      tab.classList.toggle('active', selected);
+      tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    renderPromptLibrary();
+  });
+});
+
+document.querySelectorAll('.os-tab').forEach(btn => {
+  btn.addEventListener('click', () => setDialogOS(btn.dataset.os));
+});
+
+document.querySelectorAll('[data-activity]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeActivity = btn.dataset.activity;
+    document.querySelectorAll('[data-activity]').forEach(b => b.classList.toggle('active', b === btn));
+    byId('activity-tasks-view').hidden = activeActivity !== 'tasks';
+    byId('activity-task-filters').hidden = activeActivity !== 'tasks';
+    byId('activity-audit-view').hidden = activeActivity !== 'audit';
+    byId('activity-audit-filters').hidden = activeActivity !== 'audit';
+    act(refresh);
+  });
+});
+
+byId('new-device').addEventListener('click', () => openDeviceDialog({ mode: 'add' }));
+byId('start-device-dialog').addEventListener('close', stopOnlineWatch);
+byId('verify-device').addEventListener('click', () => openVerification(''));
+byId('start-enter-code').addEventListener('click', () => { byId('start-device-dialog').close(); openVerification(''); });
+byId('copy-device-sh').addEventListener('click', () => act(async () => {
+  await copyElement('device-start-sh', '已复制 macOS / Linux 安装启动命令。');
+  setDialogStep(2);
+}));
+byId('copy-device-ps').addEventListener('click', () => act(async () => {
+  await copyElement('device-start-ps', '已复制 Windows PowerShell 安装启动命令。');
+  setDialogStep(2);
+}));
+
 byId('pair-with-invite').addEventListener('click', () => {
   byId('start-device-dialog').close();
   byId('pair-form').hidden = false;
@@ -372,42 +1022,105 @@ byId('pair-with-invite').addEventListener('click', () => {
   byId('pair-token').textContent = '';
   byId('pair-dialog').showModal();
 });
+
 byId('pair-form').addEventListener('submit', event => {
   event.preventDefault();
   act(async () => {
     const data = new FormData(event.target);
-    const reply = await api('invites', { name: data.get('name'), capabilities: data.getAll('capabilities') });
+    const approvalMode = (data.get('approvalMode') || 'client').toString();
+    const reply = await api('invites', { name: data.get('name'), capabilities: data.getAll('capabilities'), approvalMode });
     byId('pair-token').textContent = reply.token;
-    byId('pair-expiry').textContent = '有效期至 ' + time(reply.expiresAt);
+    byId('pair-expiry').textContent = '有效期至 ' + formatTime(reply.expiresAt);
     byId('pair-form').hidden = true;
     byId('pair-result').hidden = false;
   });
 });
+
 byId('pair-done').addEventListener('click', () => { byId('pair-dialog').close(); act(refresh); });
 byId('pair-dialog').addEventListener('close', () => { byId('pair-token').textContent = ''; });
-byId('copy-token').addEventListener('click', () => act(() => copy('pair-token')));
-byId('copy-mcp').addEventListener('click', () => act(() => copy('mcp-url')));
-byId('copy-overview-mcp').addEventListener('click', () => act(() => copy('overview-mcp-url')));
-byId('view-all-tasks').addEventListener('click', () => {
-  byId('task-device').value = '';
-  byId('task-status').value = '';
-  switchPanel('tasks');
-  act(refreshTasks);
+byId('lookup-device').addEventListener('click', () => act(lookupDeviceCode));
+getCodeSlots().forEach((slot, idx, slots) => {
+  slot.addEventListener('focus', () => slot.select());
+  slot.addEventListener('input', () => {
+    const cleaned = normalizeUserCode(slot.value);
+    if (cleaned.length > 1) {
+      const merged = slots.map((s, i) => (i === idx ? cleaned : normalizeUserCode(s.value))).join('');
+      const { raw } = fillCodeSlots(merged);
+      const nextIdx = Math.min(idx + cleaned.length, slots.length - 1);
+      slots[nextIdx].focus();
+      if (raw.length === 10) act(lookupDeviceCode);
+      else resetVerificationPreview();
+      return;
+    }
+    slot.value = cleaned;
+    slot.classList.toggle('filled', !!cleaned);
+    byId('verify-error').textContent = '';
+    const { raw } = syncCodeValue();
+    if (cleaned && idx < slots.length - 1) {
+      slots[idx + 1].focus();
+    }
+    if (raw.length === 10) act(lookupDeviceCode);
+    else resetVerificationPreview();
+  });
+  slot.addEventListener('keydown', event => {
+    if (event.key === 'Backspace' && !slot.value && idx > 0) {
+      event.preventDefault();
+      slots[idx - 1].value = '';
+      slots[idx - 1].classList.remove('filled');
+      slots[idx - 1].focus();
+      syncCodeValue();
+      resetVerificationPreview();
+    } else if (event.key === 'ArrowLeft' && idx > 0) {
+      event.preventDefault();
+      slots[idx - 1].focus();
+    } else if (event.key === 'ArrowRight' && idx < slots.length - 1) {
+      event.preventDefault();
+      slots[idx + 1].focus();
+    }
+  });
+  slot.addEventListener('paste', event => {
+    const pasted = (event.clipboardData || window.clipboardData)?.getData('text') || '';
+    const cleaned = normalizeUserCode(pasted);
+    if (!cleaned) return;
+    event.preventDefault();
+    const { raw } = fillCodeSlots(cleaned);
+    const focusIdx = Math.min(raw.length, slots.length - 1);
+    slots[focusIdx].focus();
+    if (raw.length === 10) act(lookupDeviceCode);
+    else resetVerificationPreview();
+  });
 });
-byId('view-connect').addEventListener('click', () => switchPanel('connect'));
-byId('copy-task-id').addEventListener('click', () => act(() => copy('task-id')));
-byId('cancel-task').addEventListener('click', () => act(async () => { await api('tasks/' + currentTask + '/cancel', {}); await updateTask(currentTask); }));
-byId('revoke-oauth').addEventListener('click', () => act(async () => {
-  if (!await confirmAction('撤销全部 ChatGPT 授权', '所有已连接的 ChatGPT 会话都需要重新进行 OAuth 授权。')) return;
-  await api('oauth/revoke', {});
-  notice('已撤销全部 ChatGPT 授权。');
+byId('verify-form').addEventListener('submit', event => { event.preventDefault(); act(() => submitDeviceDecision(true)); });
+byId('deny-device').addEventListener('click', () => act(() => submitDeviceDecision(false)));
+
+byId('copy-token').addEventListener('click', () => act(() => copyElement('pair-token', '已复制一次性令牌。')));
+byId('copy-mcp').addEventListener('click', () => act(() => copyElement('mcp-url', '已复制 MCP Server URL。')));
+byId('copy-overview-mcp').addEventListener('click', () => act(() => copyElement('overview-mcp-url', '已复制 MCP Server URL。')));
+byId('copy-task-id').addEventListener('click', () => act(() => copyElement('task-id', '已复制任务 ID。')));
+
+byId('sidebar-upgrade-btn').addEventListener('click', () => switchPanel('plan'));
+byId('banner-upgrade-btn').addEventListener('click', () => switchPanel('plan'));
+byId('plan-upgrade-btn').addEventListener('click', () => notice('兑换码自助升级将在 Issue #23 中上线，当前可由管理员在后台开通 Pro。'));
+
+byId('cancel-task').addEventListener('click', () => act(async () => {
+  await api('tasks/' + currentTask + '/cancel', {});
+  await updateTask(currentTask);
 }));
-byId('revoke-all-devices').addEventListener('click', () => act(async () => {
-  if (!await confirmAction('撤销全部设备', '所有已配对设备都需要重新配对。未完成任务将标为中断，配对码和邀请也会失效。已启动的命令请到对应设备检查。')) return;
-  const { revokedDevices, invalidatedPairings } = await api('devices/revoke-all', {});
-  notice('已撤销 ' + revokedDevices + ' 台设备，已作废 ' + invalidatedPairings + ' 项配对记录。');
+
+byId('revoke-oauth').addEventListener('click', () => act(async () => {
+  if (!await confirmAction('撤销全部 OAuth 授权', '所有已连接的 ChatGPT 与外部 MCP 会话都需要重新进行 OAuth 授权。')) return;
+  await api('oauth/revoke', {});
+  notice('已撤销全部外部客户端授权。');
+  await refreshOAuthClients();
+}));
+
+byId('clear-revoked-devices').addEventListener('click', () => act(async () => {
+  if (!await confirmAction('清理已撤销设备', '确认清空当前列表中的所有已撤销设备记录？在线和离线活跃设备以及历史任务记录不会受影响。')) return;
+  const { deletedDevices } = await api('devices/clear-revoked', {});
+  notice(`已清理 ${deletedDevices} 条已撤销设备记录。`);
   await refresh();
 }));
+
 byId('task-device').addEventListener('change', () => act(refreshTasks));
 byId('task-status').addEventListener('change', () => act(refreshTasks));
 byId('device-search').addEventListener('input', renderDevices);
@@ -415,9 +1128,17 @@ byId('device-status').addEventListener('change', renderDevices);
 byId('audit-search').addEventListener('input', renderAudit);
 byId('refresh-now').addEventListener('click', () => act(refresh));
 document.querySelectorAll('[data-close]').forEach(close => close.addEventListener('click', () => close.closest('dialog').close()));
-document.querySelectorAll('.nav-link').forEach(link => link.addEventListener('click', () => { switchPanel(link.dataset.panel); act(refresh); }));
+
+renderPromptLibrary();
+
 act(async () => {
-  try { await showApp(await api('session')); }
-  catch { showLogin(); }
+  try {
+    const res = await fetch('/manage/api/session', { credentials: 'same-origin' });
+    if (!res.ok) { showLogin(); return; }
+    await showApp(await res.json());
+  } catch {
+    showLogin();
+  }
 });
+
 setInterval(() => { if (csrf && !document.hidden) act(refresh); }, 5000);

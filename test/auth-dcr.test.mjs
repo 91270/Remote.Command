@@ -28,37 +28,24 @@ test('RotatingLogger splits log files by size using YYYYMMDD-HHmm.log format', a
   }
 });
 
-test('Store creates initial admin once with 8-char password and authenticates it', async () => {
-  const temp = await mkdtemp(join(tmpdir(), 'rcm-admin-init-'));
-  const store = new Store(join(temp, 'gateway.sqlite'));
-  try {
-    const first = store.ensureInitialAdmin();
-    assert.ok(first);
-    assert.equal(first.username, 'admin');
-    assert.equal(first.password.length, 8);
-    assert.match(first.password, /^[A-Za-z0-9]{8}$/);
-
-    const second = store.ensureInitialAdmin();
-    assert.equal(second, null);
-
-    const ok = store.authenticateUser('admin', first.password);
-    assert.ok(ok);
-    assert.equal(ok.username, 'admin');
-    assert.equal(ok.role, 'admin');
-
-    assert.equal(store.authenticateUser('admin', 'wrongpwd'), null);
-    assert.equal(store.authenticateUser('other', first.password), null);
-  } finally {
-    store.db.close();
-    await rm(temp, { recursive: true, force: true });
-  }
-});
-
 test('OAuth discovery exposes registration_endpoint and DCR completes full authorization flow', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'rcm-oauth-dcr-'));
   const store = new Store(join(temp, 'gateway.sqlite'));
-  const admin = store.ensureInitialAdmin();
-  assert.ok(admin);
+  const created = store.createGoogleUser({
+    sub: 'sub-dcr-admin',
+    email: 'dcr-admin@example.com',
+    displayName: 'DCR Admin',
+    avatarUrl: null,
+    adminEmails: new Set()
+  });
+  assert.equal(created.status, 'ok');
+  const dashToken = secret();
+  store.putAuth(dashToken, 'dashboard', 3600000, {
+    csrf: secret(),
+    userId: created.user.id,
+    username: created.user.email,
+    role: created.user.role
+  });
   const ownerKey = secret();
   let oauth;
   const server = createServer(async (req, res) => {
@@ -121,24 +108,32 @@ test('OAuth discovery exposes registration_endpoint and DCR completes full autho
       resource: origin + '/mcp',
       scope: 'remote:use'
     });
-    const authPageRes = await fetch(authMeta.authorization_endpoint + '?' + authQuery.toString());
-    assert.equal(authPageRes.status, 200);
-    assert.match(authPageRes.headers.get('content-security-policy'), /form-action 'self' https:\/\/chatgpt\.com/);
-    const html = await authPageRes.text();
-    assert.match(html, /ChatGPT/);
-    assert.match(html, /name="username"/);
-    assert.match(html, /name="password"/);
+    const unauthPageRes = await fetch(authMeta.authorization_endpoint + '?' + authQuery.toString());
+    assert.equal(unauthPageRes.status, 200);
+    assert.match(unauthPageRes.headers.get('content-security-policy'), /form-action 'self' https:\/\/chatgpt\.com/);
+    const unauthHtml = await unauthPageRes.text();
+    assert.match(unauthHtml, /ChatGPT/);
+    assert.match(unauthHtml, /\/auth\/google\/start/);
+    assert.doesNotMatch(unauthHtml, /type="password"/);
+    assert.doesNotMatch(unauthHtml, /name="password"/);
 
+    const authPageRes = await fetch(authMeta.authorization_endpoint + '?' + authQuery.toString(), {
+      headers: { Cookie: `rcm_dashboard=${dashToken}` }
+    });
+    assert.equal(authPageRes.status, 200);
+    const html = await authPageRes.text();
     const hiddenInputs = [...html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)">/g)];
     const formData = new URLSearchParams();
     for (const [, k, v] of hiddenInputs) formData.set(k, v);
-    formData.set('username', 'admin');
-    formData.set('password', admin.password);
+    assert.equal(formData.get('session_auth'), '1');
 
     const authPostRes = await fetch(authMeta.authorization_endpoint, {
       method: 'POST',
       redirect: 'manual',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: `rcm_dashboard=${dashToken}`
+      },
       body: formData
     });
     assert.equal(authPostRes.status, 303);
@@ -231,5 +226,147 @@ test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect
     assert.ok(tgzRes.status === 200 || tgzRes.status === 302);
   } finally {
     await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('OAuth refresh_token preserves selectedDevice across rotations and drops it if device is revoked', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-oauth-selected-device-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const created = store.createGoogleUser({
+    sub: 'sub-refresh-admin',
+    email: 'refresh-admin@example.com',
+    displayName: 'Refresh Admin',
+    avatarUrl: null,
+    adminEmails: new Set()
+  });
+  assert.equal(created.status, 'ok');
+  const admin = created.user;
+  const dashToken = secret();
+  store.putAuth(dashToken, 'dashboard', 3600000, {
+    csrf: secret(),
+    userId: admin.id,
+    username: admin.email,
+    role: admin.role
+  });
+  const dev = store.pair(store.invite('workstation', ['read'], admin.id), secret());
+  assert.ok(dev);
+  let oauth;
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, origin);
+      if (await oauth.route(req, res, url)) return;
+      res.writeHead(404).end();
+    } catch {
+      res.writeHead(500).end();
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  oauth = new OAuth(store, { origin, ownerKey: secret() });
+
+  try {
+    const reg = await (await fetch(origin + '/oauth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_name: 'ChatGPT',
+        redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect']
+      })
+    })).json();
+
+    const verifier = secret() + secret();
+    const authUrl = origin + '/oauth/authorize?' + new URLSearchParams({
+      client_id: reg.client_id,
+      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+      response_type: 'code',
+      code_challenge: hash(verifier),
+      code_challenge_method: 'S256',
+      state: 'st-refresh',
+      resource: origin + '/mcp',
+      scope: 'remote:use'
+    });
+    const pageHtml = await (await fetch(authUrl, {
+      headers: { Cookie: `rcm_dashboard=${dashToken}` }
+    })).text();
+    const hidden = Object.fromEntries([...pageHtml.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)">/g)].map(m => [m[1], m[2]]));
+    assert.equal(hidden.session_auth, '1');
+    const consentRes = await fetch(origin + '/oauth/authorize', {
+      method: 'POST',
+      redirect: 'manual',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: `rcm_dashboard=${dashToken}`
+      },
+      body: new URLSearchParams(hidden)
+    });
+    assert.equal(consentRes.status, 303);
+    const code = new URL(consentRes.headers.get('location')).searchParams.get('code');
+
+    const initialTokens = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+        code_verifier: verifier,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.ok(initialTokens.access_token && initialTokens.refresh_token);
+
+    // Select device on the initial access token
+    assert.equal(store.setOAuthSelectedDevice(initialTokens.access_token, dev.id), true);
+
+    // First refresh rotation
+    const refresh1 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: initialTokens.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.ok(refresh1.access_token && refresh1.refresh_token);
+    assert.equal(store.getAuth(refresh1.access_token, 'access').data.selectedDevice, dev.id);
+
+    // Second refresh rotation still preserves selectedDevice
+    const refresh2 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh1.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.equal(store.getAuth(refresh2.access_token, 'access').data.selectedDevice, dev.id);
+
+    // Revoking the device drops stale selectedDevice on subsequent refresh
+    assert.equal(store.revoke(dev.id, admin.id), true);
+    const refresh3 = await (await fetch(origin + '/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refresh2.refresh_token,
+        client_id: reg.client_id,
+        client_secret: reg.client_secret,
+        resource: origin + '/mcp'
+      })
+    })).json();
+    assert.equal(store.getAuth(refresh3.access_token, 'access').data.selectedDevice, undefined);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
   }
 });

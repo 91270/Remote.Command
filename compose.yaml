@@ -7,7 +7,14 @@ services:
     restart: unless-stopped
     stop_grace_period: 25s
     environment:
-      PUBLIC_ORIGIN: https://remote.mcp.592.la
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://remote.mcp.592.la}
+      # 必填：Google OAuth 凭据（回调地址配置为 ${PUBLIC_ORIGIN}/auth/google/callback）
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # 可选：限定首个管理员 Google 邮箱（留空则首个通过 Google 登录的用户自动成为管理员）
+      # ADMIN_GOOGLE_EMAILS: you@gmail.com
+      # 部署在宿主机 Nginx 等反向代理后时建议开启，用于限流识别真实客户端 IP
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # OAuth 客户端与回调地址已通过 DCR (/oauth/register) 自动发现并注册，无需手动配置
       # 如需限制额外回调域名，可按需配置 OAUTH_ALLOWED_REDIRECT_HOSTS: chatgpt.com,platform.openai.com
     volumes:

@@ -21,5 +21,5 @@ COPY --chown=node:node vendor/desktop-commander-full/catalog.json ./vendor/deskt
 COPY --chown=node:node web ./web
 USER node
 EXPOSE 8787
-HEALTHCHECK --interval=15s --timeout=4s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:' + process.env.PORT + '/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+HEALTHCHECK --interval=15s --timeout=4s --start-period=5s --start-interval=1s --retries=3 CMD ["node", "-e", "fetch('http://127.0.0.1:' + process.env.PORT + '/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "dist/gateway.js"]

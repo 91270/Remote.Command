@@ -1,42 +1,108 @@
-# Remote.Command 生产运维指南
+[中文](production.md) · [English](production.en.md)
 
-本文档面向单管理员生产环境部署，涵盖 **Gateway 首次部署、离线镜像导入、版本升级与回退、Agent 后台服务托管、在线备份恢复与日常巡检**。
+# Remote.Command 生产部署与运维指南
+
+本文档面向单实例或多租户生产环境部署，涵盖 **Gateway 首次部署（Google OIDC + Docker Compose + HTTPS）、离线镜像导入、版本升级与回退、构建发布、Agent 后台服务托管、在线备份恢复与日常巡检**。本地开发环境搭建请见 [开发环境指南](development.md)。
 
 > [!NOTE]
-> 宿主机 Nginx 负责公网域名和 HTTPS。Gateway 使用 GitHub Container Registry 上的镜像，端口映射到 `127.0.0.1:8787`。SQLite 存放在 Compose 的 `volumes.source` 指定的宿主机目录，默认是 `./data`。
+> 宿主机 Nginx（或反代边缘）负责公网域名和 HTTPS TLS 终止；Gateway 使用 GitHub Container Registry（GHCR）上的官方容器镜像，监听 `8787`。SQLite 状态与轮转日志存放在 Compose 的 `volumes.source` 宿主机目录（默认 `./data`）。
 
 ---
 
 ## 1. 首次部署
 
-准备一台安装了 Docker Compose 和 Nginx 的 Linux 服务器。将域名解析到这台服务器，并在 Nginx 准备对应证书。公网客户端访问 HTTPS `443`。
+### 1.1 架构与前置准备
 
-1. 将当前 [compose.yaml](../compose.yaml) 保存到服务器的部署目录。包含独立 `remote-command-<版本>-compose.yaml` 的 Release 也可直接下载该文件并保存为 `compose.yaml`。如果 GHCR 包为私有，先用具备 `read:packages` 权限的账号执行 `docker login ghcr.io`。
-2. 在 `compose.yaml` 直接填写 `PUBLIC_ORIGIN`、`OAUTH_CLIENT_ID`、`OAUTH_REDIRECT_URIS` 和 `volumes.source`。`PUBLIC_ORIGIN` 是 Nginx 对外的 HTTPS 地址，用于生成 OAuth 元数据和设备配对链接。
+准备一台已安装 **Docker Engine / Docker Compose** 与 **Nginx**（或等效 HTTPS 反向代理）的 Linux 服务器：
 
-3. 首次部署时准备数据目录。以下命令以默认目录 `./data` 为例。Gateway 容器以 `1000:1000` 运行，该用户需要对数据目录有读写权限。
+- 将一个独立生产域名（如 `mcp.example.com`，**建议与开发测试子域名分开**）解析到该服务器。
+- 为宿主机 Nginx 申请并配置好 TLS 证书（例如 Let's Encrypt），确保公网统一通过 HTTPS `443` 访问。
+
+### 1.2 配置生产环境 Google OAuth 2.0
+
+Gateway 已统一采用 **Google OIDC** 鉴权，不再使用本地账号密码，因此启动前必须先准备好 Google OAuth 凭证：
+
+1. 在 [Google Cloud Console](https://console.cloud.google.com/) 进入 **Google Auth Platform**（`https://console.cloud.google.com/auth`）。
+   - **建议为生产环境单独新建 Web 应用 OAuth Client**（与本地开发客户端隔离）。
+2. 在 **客户端（Clients）→ 创建客户端（Web 应用）** 中填写：
+   - **已获授权的重定向 URI（Authorized redirect URIs）**：精确填写（无尾部斜杠）：
+     ```text
+     https://mcp.example.com/auth/google/callback
+     ```
+3. 记录 **`Client ID`** 与 **`Client Secret`**。
+4. **目标群体（Audience）状态选择**：
+   - **仅限自己或固定白名单成员使用**：保持 **测试（Testing）** 状态，把允许登录的 Gmail 加入 **Test users（测试用户）**，无需提交 Google 审核。
+   - **需面向任意公众 Google 账号开放**：在 Google Auth Platform 完善 **Branding（品牌信息、域名验证与隐私政策链接）** 后点击发布到 **In Production**；本项目仅请求基础非敏感 scope（`openid email profile`）。
+
+### 1.3 准备部署目录、环境变量与启动 Gateway
+
+1. 在服务器创建专用部署目录，并保存仓库中的 [compose.yaml](../compose.yaml)（包含独立 `remote-command-<版本>-compose.yaml` 的 Release 也可直接下载重命名为 `compose.yaml`）。若 GHCR 镜像包为私有，先用具备 `read:packages` 权限的账号执行 `docker login ghcr.io`。
+
+2. 参考模板 [deploy/production.env.example](../deploy/production.env.example)，在与 `compose.yaml` 同目录创建受保护的 `.env` 文件（Docker Compose 会自动读取，**切勿将真实密钥直接硬编码进版本控制中的 YAML 或提交到 Git**）：
+
+```sh
+cp deploy/production.env.example .env && chmod 600 .env
+# 编辑 .env，填入生产 PUBLIC_ORIGIN、GOOGLE_CLIENT_ID、GOOGLE_CLIENT_SECRET、ADMIN_GOOGLE_EMAILS 与 TRUST_PROXY=1
+```
+
+   - **`ADMIN_GOOGLE_EMAILS`（强烈建议填写）**：指定首个允许初始化注册为管理员的 Google 邮箱（多个用英文逗号分隔）。若留空，空库状态下第一个完成 Google 登录的人将成为管理员。
+   - **`TRUST_PROXY=1`**：容器运行在宿主机 Nginx 反向代理之后时开启，确保速率限制器依据 `X-Forwarded-For` / `X-Real-IP` 识别真实来源 IP。
+   - **端口映射安全建议**：默认 `compose.yaml` 使用 `"8787:8787"`；若宿主机已通过本机 Nginx 终止 TLS，建议改为 `"127.0.0.1:8787:8787"`，避免公网绕过 HTTPS 直线访问 `8787`。
+   - **OAuth DCR**：ChatGPT 与 Codex 会通过 `/.well-known/oauth-*` 与 `/oauth/register` 自动完成动态客户端注册，无需再手动配置静态 `OAUTH_CLIENT_ID` 或 `OAUTH_REDIRECT_URIS`。
+
+3. 准备宿主机数据目录。Gateway 容器默认以 UID/GID `1000:1000` 运行，必须确保该目录权限正确（命令以默认 `./data` 为例）：
 
 ```sh
 sudo install -d -m 0700 -o 1000 -g 1000 ./data
 ```
 
-4. 启动 Gateway。Compose 按需拉取镜像。Gateway 在 SQLite 所在目录初始化 `.oauth_client_secret` 和 `.owner_key`，权限为 `0600`。默认宿主机路径是 `data/.oauth_client_secret` 和 `data/.owner_key`。已有密钥文件会在容器重建后继续使用。
+4. 启动 Gateway。Compose 会拉取镜像并初始化 SQLite（`data/gateway.sqlite`）及内部凭据文件（`data/.owner_key` 等，权限 `0600`，容器重建后保持复用）：
 
 ```sh
 docker compose up -d --wait
 ```
 
-   若部署时已有同一站点的凭证，可在首次启动前将原值写入对应文件，设置所有者为 `1000:1000`、权限为 `0600`。
+   查看启动日志确认无缺失环境变量报错且处于等待首个管理员登录状态：
 
-5. 将 [Nginx 站点示例](../deploy/nginx/remote-command.conf) 放到宿主机 Nginx 已启用的站点配置目录。修改 `server_name`、`ssl_certificate` 和 `ssl_certificate_key`，使域名与 Compose 的 `PUBLIC_ORIGIN` 一致。站点保留完整 URI，将 `/mcp`、OAuth、Agent 接口和 `/manage` 统一转发到 `127.0.0.1:8787`。示例的 `40m` 请求体上限与 Gateway 同步接口一致。
+```sh
+docker compose logs --tail 50 gateway
+```
 
-   以使用 systemd 且包含 `/etc/nginx/conf.d/*.conf` 的服务器为例，放置并编辑配置后执行下面的命令。
+### 1.4 配置宿主机 Nginx 与 HTTPS
+
+1. 将 [Nginx 站点示例](../deploy/nginx/remote-command.conf) 复制到宿主机 Nginx 已启用站点目录（如 `/etc/nginx/conf.d/remote-command.conf`），将 `server_name`、`ssl_certificate`、`ssl_certificate_key` 替换为你的生产域名与证书路径。
+2. 示例已包含以下关键配置：
+   - `client_max_body_size 40m;`：与 Gateway 的 40 MiB 同步体积上限一致。
+   - `proxy_buffering off;`、`proxy_cache off;`：保障 MCP 流式响应与心跳实时透传。
+   - 完整保留 `Host`、`X-Forwarded-Proto`、`X-Forwarded-For`、`X-Real-IP` 请求头。
+3. **宝塔等面板用户必看**：若已有通用静态规则（如 `location ~ \.well-known`），会截获 OAuth 自动发现请求并返回 404，务必添加优先前缀规则将 `/.well-known/oauth-` 转发给 Gateway：
+
+```nginx
+location ^~ /.well-known/acme-challenge/ { allow all; }
+location ^~ /.well-known/oauth- {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+4. 校验并重载 Nginx：
 
 ```sh
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-6. 从宿主机检查 `http://127.0.0.1:8787/readyz`，再从客户端检查 `https://mcp.example.com/readyz`。确认 `https://mcp.example.com/.well-known/oauth-protected-resource/mcp` 返回的 `resource` 使用实际 HTTPS 域名。用 `data/.owner_key` 登录 `/manage`，再按 [README 快速开始](../README.md#第二步在目标电脑启动-agent) 安装同版本 Agent 并接入 ChatGPT。
+### 1.5 首次初始化与生产验收
+
+1. 本机与公网连通性验证：
+   - 宿主机：`curl -fsS http://127.0.0.1:8787/readyz`
+   - 公网客户端：`curl -fsS https://mcp.example.com/readyz`
+   - 确认 `https://mcp.example.com/.well-known/oauth-protected-resource/mcp` 返回的 `resource` 为 `https://mcp.example.com/mcp`。
+2. **完成首个管理员登录**：浏览器打开 `https://mcp.example.com/manage`，点击 **使用 Google 账号继续**，使用 `ADMIN_GOOGLE_EMAILS` 指定的 Google 账号完成注册与登录。
+3. **确认注册策略**：进入控制台 **成员与邀请**，按需设置新用户注册模式（默认 `invite` 仅凭管理员生成的邀请码注册，也可改为 `closed` 关闭或 `open` 开放）。
+4. **接入设备与 ChatGPT**：按 [README 快速开始](../README.md#第二步在目标电脑启动-agent) 在目标电脑安装同版本 Agent 并配对，然后在 ChatGPT 添加 `https://mcp.example.com/mcp`（OAuth 自动发现接入）。
 
 ---
 
@@ -44,16 +110,16 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ### 使用离线镜像包
 
-以 `0.5.0` 为例。导入 `linux/amd64` 离线镜像后，将 Compose 的 `image` 改为 `remote-command:0.5.0`。
+以特定版本离线包为例，导入 `linux/amd64` 离线镜像后，将 Compose 的 `image` 改为对应本地 tag：
 
 ```sh
-docker image load -i remote-command-0.5.0-gateway-linux-amd64.tar.gz
+docker image load -i remote-command-<version>-gateway-linux-amd64.tar.gz
 docker compose up -d --pull never --wait
 ```
 
 ### 从源码目录直接构建
 
-维护者可在源码根目录构建镜像。将测试环境 Compose 的 `image` 设为 `remote-command:local` 后启动。
+维护者可在源码根目录直接构建本地镜像，将测试环境 Compose 的 `image` 设为 `remote-command:local` 后启动：
 
 ```sh
 docker build -t remote-command:local .
@@ -64,10 +130,15 @@ docker compose up -d --pull never --wait
 
 ## 3. 升级与回退
 
-1. **备份先行**：升级前执行在线备份并校验备份文件（见第 6 节），同时保留现用镜像、Compose 配置和密钥文件。
-2. **更新镜像**：更新 Compose 的 `image`，保留同一个宿主机数据目录与密钥文件，然后执行 `docker compose up -d --wait`。
-3. **升级验收**：等待 `/readyz` 返回成功，在 ChatGPT 中对已配对设备执行一次读取、一次需本机确认的操作和一次后台任务，核对结果正常。
-4. **回退处理**：需要回退数据时，将升级前的快照恢复到新数据库路径（见第 6 节），并恢复对应镜像和 Compose 配置。
+1. **备份先行**：升级前执行在线备份并校验备份文件（见第 6 节），同时保留现用镜像标签、Compose 配置、`.env` 和密钥文件。
+2. **更新镜像**：更新 `compose.yaml` 中的 `image` 版本号，保持同一个宿主机 `./data` 目录与 `.env`，执行：
+
+```sh
+docker compose pull && docker compose up -d --wait
+```
+
+3. **升级验收**：等待 `/readyz` 返回成功、检查 `/manage` Google 登录状态正常，并在 ChatGPT 中对已配对设备执行一次读取、一次需本机确认的操作和一次后台任务，核对结果正常。
+4. **回退处理**：需要回退数据时，将升级前的 SQLite 快照恢复到新数据库路径（见第 6 节），并恢复对应镜像版本与 Compose 配置。
 
 ---
 
@@ -78,10 +149,10 @@ docker compose up -d --pull never --wait
 ```sh
 npm run package:release -- --with-image
 cd releases
-shasum -a 256 -c remote-command-0.5.0-SHA256SUMS
+shasum -a 256 -c remote-command-<version>-SHA256SUMS
 ```
 
-也可在 GitHub Actions 中手动触发 **Verify** 工作流并勾选发布选项。测试全部通过后，工作流将 Gateway 镜像推送至 GHCR，并在 GitHub Release 上传独立 Compose 文件、Agent 安装包、部署包、离线镜像与 SHA-256 清单。
+也可在 GitHub Actions 中手动触发 **CI & Release** 工作流并勾选发布选项。测试全部通过后，工作流将 Gateway 镜像推送至 GHCR，并在 GitHub Release 上传独立 Compose 文件、Agent 安装包、部署包、离线镜像与 SHA-256 清单。
 
 ---
 
@@ -92,12 +163,12 @@ shasum -a 256 -c remote-command-0.5.0-SHA256SUMS
 ### macOS / Linux
 
 ```sh
-rcm_client="$HOME/.remote-command/client-0.5.0"
+rcm_client="$HOME/.remote-command/client"
 mkdir -p "$rcm_client"
-tar -xzf /path/to/remote-command-0.5.0.tgz -C "$rcm_client" --strip-components=1
+tar -xzf /path/to/remote-command-<version>.tgz -C "$rcm_client" --strip-components=1
 (cd "$rcm_client" && npm ci --omit=dev --ignore-scripts)
 
-# 1. 先在前台完成首次交互式配对，成功后按 Ctrl+C 退出
+# 1. 先在前台完成首次交互式配对（用你的 Google 账号完成确认），成功后按 Ctrl+C 退出
 node "$rcm_client/dist/remote-cli.js" remote
 
 # 2. 注册并启动后台服务（若使用自定义配置路径，请替换最后一个参数）
@@ -124,16 +195,16 @@ node "$rcm_client/dist/remote-cli.js" service install "$HOME/.remote-command/age
 
 ## 6. 在线备份与恢复演练
 
-备份文件包含设备配对、工具结果与审计历史，请仅限管理员读写，并在异机保留加密副本。SQLite 快照之外，还需单独备份两个密钥文件、Compose 和 Nginx 配置。
+备份文件包含用户、设备配对、工具结果与审计历史，请仅限管理员读写，并在异机保留加密副本。SQLite 快照之外，还需单独备份 `.env`、`data/.owner_key`、Compose 和 Nginx 配置。
 
 ### 在线备份与校验
 
-在部署目录执行以下命令。从容器在线导出 SQLite 快照，校验通过后写入最终备份文件，已有同名文件会保留。
+在部署目录执行以下命令。从容器在线导出 SQLite 快照，校验通过后原子写入最终备份文件，已有同名文件会保留：
 
 ```sh
 (
   umask 077
-  backup=/private/backups/rcm-2026-11-19.sqlite
+  backup=/private/backups/rcm-$(date +%F).sqlite
   temporary=$(mktemp "$backup.XXXXXX") || exit
   trap 'rm -f -- "$temporary"' EXIT
   docker compose exec -T gateway node dist/admin.js backup > "$temporary" &&
@@ -149,17 +220,17 @@ node "$rcm_client/dist/remote-cli.js" service install "$HOME/.remote-command/age
 ```sh
 # 1. 将备份导入新路径
 docker compose run --rm --no-deps -T -e STATE_DB=/data/gateway-recovered.sqlite gateway \
-  node dist/admin.js restore < /private/backups/rcm-2026-11-19.sqlite
+  node dist/admin.js restore < /private/backups/rcm-YYYY-MM-DD.sqlite
 ```
 
-2. 在维护窗口给 Compose 的 `gateway.environment` 增加 `STATE_DB: /data/gateway-recovered.sqlite`，然后重启 Gateway。
+2. 在维护窗口给 Compose 的 `gateway.environment` 增加 `STATE_DB: /data/gateway-recovered.sqlite`，然后重启 Gateway：
 
 ```sh
 docker compose up -d --wait gateway
 ```
 
 > [!IMPORTANT]
-> 恢复操作会保留已完成调用的结果与审计记录，但会**清除 OAuth 会话、管理页会话和待用邀请**，将所有设备标为已撤销、进行中的任务标为已中断。恢复完成后请重新配对设备并授权 ChatGPT，同时检查原设备是否有旧进程仍在运行。
+> 恢复操作会保留用户账号、已完成调用的结果与审计记录，但会**清除所有登录会话、OAuth 会话和待用邀请**，将所有设备标为已撤销、进行中的任务标为已中断。恢复完成后请重新通过 Google 登录 `/manage`、重新配对设备并重新授权 ChatGPT，同时检查原设备是否有旧进程仍在运行。
 
 ---
 
@@ -168,9 +239,9 @@ docker compose up -d --wait gateway
 | 检查项 | 验证方式与说明 |
 | --- | --- |
 | **服务健康** | `/healthz`（存活）与 `/readyz`（数据库可访问）均返回 `200`。 |
-| **HTTPS 与 OAuth** | 确认 TLS 证书有效，且 `/.well-known/oauth-protected-resource/mcp` 中的资源 URI 指向你的 HTTPS Gateway。 |
-| **日志与磁盘** | 执行 `docker compose logs --tail 100 gateway`，按宿主机配置查看 Nginx 日志，并检查磁盘与备份空间。 |
-| **数据保留策略** | 已结束任务默认保留 **7 天**，审计日志默认保留 **90 天**。可在 Compose 的 `gateway.environment` 设置 `RCM_TASK_RETENTION_DAYS` 和 `RCM_AUDIT_RETENTION_DAYS`。 |
-| **紧急撤销与诊断** | `/manage` 可撤销单台或全部设备，也可单独撤销 ChatGPT 授权。客户端可使用 `remote --report` 导出脱敏诊断包。 |
+| **HTTPS 与 OAuth** | 确认 TLS 证书有效，`/.well-known/oauth-protected-resource/mcp` 指向你的 HTTPS Gateway，且 `/auth/google/start` 能正常重定向到 Google 授权页。 |
+| **日志与磁盘** | 执行 `docker compose logs --tail 100 gateway`，查看限流或上游 OIDC 错误；检查宿主机 Nginx 日志与备份磁盘空间。 |
+| **数据保留策略** | 已结束任务默认保留 **7 天**（`RCM_TASK_RETENTION_DAYS`），审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
+| **紧急撤销与诊断** | 控制台 `/manage` 可按用户撤销单台设备、全部设备或 OAuth 授权，管理员还可停用异常成员账号；客户端可使用 `remote --report` 导出脱敏诊断包。 |
 
-真实域名生产验收建议覆盖：外网 TLS 证书、真实 ChatGPT 账号接入、一次读操作、一次本机审批操作、一次后台任务查询及一次备份恢复演练。当前已验证环境与待测项见 [验收记录](verification.md)。
+真实域名生产验收建议覆盖：外网 TLS 证书、真实 Google OIDC 管理员与邀请用户登录、真实 ChatGPT 账号接入、一次读操作、一次本机审批操作、一次后台任务查询及一次备份恢复演练。当前已验证环境与待测项见 [验收记录](verification.md)。

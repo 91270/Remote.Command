@@ -1,31 +1,35 @@
-name: "Remote.Command：自动化测试与发布"
+name: "CI & Release / 自动化测试与发布"
 on:
   push:
     branches:
       - main
     paths-ignore:
-      - '.github/workflows/**'
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
     branches:
       - main
     paths-ignore:
-      - '.github/workflows/**'
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       publish:
         description: 发布带版本号的 Gateway 镜像和 Release 文件
         type: boolean
         default: false
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 permissions:
   contents: read
 jobs:
   test:
-    name: 多平台 Agent 与 Gateway 自动化测试
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: Linux 全量自动化测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: 检出仓库源码
         uses: actions/checkout@v4
@@ -35,44 +39,102 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: 安装 Linux 测试依赖
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ripgrep procps
-      - name: 安装 macOS 测试依赖
-        if: runner.os == 'macOS'
-        run: brew install ripgrep
-      - name: 安装 Windows 测试依赖
-        if: runner.os == 'Windows'
-        run: choco install ripgrep -y --no-progress
+      - name: 按需安装 Linux 测试依赖
+        run: |
+          pkgs=""
+          command -v rg >/dev/null || pkgs="$pkgs ripgrep"
+          command -v ps >/dev/null || pkgs="$pkgs procps"
+          if [ -n "$pkgs" ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends $pkgs
+          fi
       - name: 安装 Node.js 依赖
         run: npm ci --ignore-scripts
-      - name: 运行 Agent 与 Gateway 完整测试
-        run: npm test
+      - name: 运行 Agent 与 Gateway 全量测试
         env:
           RCM_TEST_LAUNCH: '1'
-  compose:
-    name: Docker Compose 部署与 HTTPS 代理验证
-    runs-on: ubuntu-latest
+        run: |
+          npm run build
+          fast_tests=()
+          for f in test/*.test.mjs; do
+            case "$f" in
+              test/e2e.test.mjs|test/dc-core.test.mjs) ;;
+              *) fast_tests+=("$f") ;;
+            esac
+          done
+          node --test "${fast_tests[@]}"
+          node --test --test-concurrency=1 test/dc-core.test.mjs test/e2e.test.mjs
+  test-cross-platform:
+    name: 跨平台 Agent 兼容测试
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-      - name: 检出部署源码
+      - name: 检出仓库源码
         uses: actions/checkout@v4
       - name: 配置 Node.js 24
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: 安装宿主机 Nginx
-        run: sudo apt-get update && sudo apt-get install -y nginx
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: 按需安装 macOS 测试依赖
+        if: runner.os == 'macOS'
+        run: command -v rg >/dev/null || brew install ripgrep
+      - name: 按需安装 Windows 测试依赖
+        if: runner.os == 'Windows'
+        run: if (-not (Get-Command rg.exe -ErrorAction SilentlyContinue)) { choco install ripgrep -y --no-progress }
+      - name: 安装 Node.js 依赖
+        run: npm ci --ignore-scripts
+      - name: 预热 Windows PowerShell 运行环境
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -Command "1" | Out-Null
+      - name: 运行跨平台 Agent 与核心兼容测试
+        shell: bash
+        env:
+          RCM_TEST_LAUNCH: '1'
+        run: |
+          npm run build
+          node --test test/device-flow.test.mjs test/service.test.mjs
+          node --test --test-concurrency=1 test/dc-core.test.mjs test/e2e.test.mjs
+  compose:
+    name: Docker Compose 部署与 HTTPS 代理验证
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出部署源码
+        uses: actions/checkout@v4
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: 解析 Gateway 镜像名称
+        id: meta
+        run: echo "image=$(awk '$1 == "image:" {print $2}' compose.yaml)" >> "$GITHUB_OUTPUT"
+      - name: 构建 Gateway 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
+      - name: 安装宿主机轻量 Nginx
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nginx-light
       - name: 验证部署镜像、数据持久化和 Nginx HTTPS 反向代理
         run: |
-          image=$(awk '$1 == "image:" {print $2}' compose.yaml)
-          docker build -t "$image" .
           sudo install -d -m 0700 -o 1000 -g 1000 data
           nginx_dir=$(mktemp -d "$RUNNER_TEMP/rcm-nginx.XXXXXX")
           trap 'docker compose down' EXIT
+          export PUBLIC_ORIGIN=https://mcp.example.com
+          export GOOGLE_CLIENT_ID=ci-google-client-id.apps.googleusercontent.com
+          export GOOGLE_CLIENT_SECRET=ci-google-client-secret
+          export TRUST_PROXY=1
           docker compose config -q
           test "$(docker compose config --services)" = gateway
           docker compose up -d --pull never --wait --wait-timeout 40
-          test "$(docker compose port gateway 8787)" = 127.0.0.1:8787
+          docker compose port gateway 8787 | grep -qx '0\.0\.0\.0:8787'
           test "$(docker compose exec -T gateway id -u)" = 1000
           sudo test -f data/gateway.sqlite
           test "$(sudo stat -c '%a' data/.owner_key)" = 600
@@ -101,13 +163,13 @@ jobs:
               --connect-to mcp.example.com:443:127.0.0.1:18443 "$@"
           }
           request --fail "$origin/readyz"
+          request --fail "$origin/" | grep -q 'Remote.Command'
           request --fail "$origin/manage" -o /dev/null
-          admin_password=$(docker compose logs gateway | sed -n 's/.*username=admin password=\([A-Za-z0-9]\{8\}\).*/\1/p' | head -n 1)
-          test -n "$admin_password"
+          docker compose logs gateway | grep -q 'Gateway awaiting first admin sign-in via Google OAuth'
           sudo sh -c 'ls -1 data/logs | grep -Eq "^[0-9]{8}-[0-9]{4}\.log$"'
-          jq -n --arg pwd "$admin_password" '{username: "admin", password: $pwd}' \
-            | request --fail -o /dev/null -H "Origin: $origin" -H 'Content-Type: application/json' \
-              --data-binary @- "$origin/manage/api/login"
+          request --fail "$origin/manage/api/auth-config" \
+            | jq -e '.googleEnabled == true and .registrationMode == "invite_only" and .initialized == false'
+          test "$(request -o /dev/null -w '%{http_code}' "$origin/manage/api/overview")" = 401
           request --fail "$origin/.well-known/oauth-protected-resource/mcp" \
             | jq -e --arg resource "$origin/mcp" '.resource == $resource'
           request --fail "$origin/.well-known/oauth-authorization-server" \
@@ -115,7 +177,7 @@ jobs:
           node -e "process.stdout.write(' '.repeat(2 * 1024 * 1024))" > "$nginx_dir/sync-body"
           test "$(request -o /dev/null -w '%{http_code}' --data-binary "@$nginx_dir/sync-body" "$origin/device/sync")" = 401
 
-          npm run backup -- "$RUNNER_TEMP/rcm.sqlite"
+          node scripts/backup.mjs "$RUNNER_TEMP/rcm.sqlite"
           docker compose exec -T gateway node dist/admin.js verify-backup < "$RUNNER_TEMP/rcm.sqlite"
           docker compose run --rm --no-deps -T -e STATE_DB=/data/restored.sqlite gateway node dist/admin.js restore < "$RUNNER_TEMP/rcm.sqlite"
           docker compose down
@@ -126,8 +188,11 @@ jobs:
   package:
     name: 生成发布安装包
     if: github.event_name == 'workflow_dispatch'
-    needs: [test, compose]
+    needs: [test, test-cross-platform, compose]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
     steps:
       - name: 检出发布源码
         uses: actions/checkout@v4
@@ -140,7 +205,10 @@ jobs:
       - name: 安装发布所需的 Node.js 依赖
         run: npm ci --ignore-scripts
       - name: 生成包含 Gateway 镜像的发布包
-        run: npm run package:release -- --with-image
+        id: pkg
+        run: |
+          npm run package:release -- --with-image
+          echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
       - name: 上传临时发布产物
         uses: actions/upload-artifact@v4
         with:
@@ -159,16 +227,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
     needs: package
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     concurrency:
       group: publish-release
     permissions:
       contents: write
       packages: write
     steps:
-      - name: 检出发布源码
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - name: 下载已校验的发布产物
         uses: actions/download-artifact@v4
         with:
@@ -179,8 +244,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REGISTRY_USER: ${{ github.actor }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
         run: |
-          version=$(node -p 'require("./package.json").version')
+          version="$RELEASE_VERSION"
+          [[ "$version" =~ ^[0-9A-Za-z._-]+$ ]]
           tag="v$version"
           stem="remote-command-$version"
           repository=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')

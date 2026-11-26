@@ -36,22 +36,17 @@ flowchart LR
 
 ### 第一步：部署 Gateway 服务端
 
-在已安装 Docker Compose 和 Nginx 的 Linux 服务器上部署。将自定义域名解析到这台服务器，并为 Nginx 配置域名证书。公网客户端统一访问 HTTPS `443`。
+在已安装 Docker Compose 和 Nginx 的 Linux 服务器上部署。将自定义域名解析到这台服务器，并在宿主机 Nginx 配置好 TLS 证书，公网客户端统一访问 HTTPS `443`（本地开发环境与 Cloudflare Tunnel 联调见 [开发环境指南](docs/development.md) · [English](docs/development.en.md)）。
 
-1. 将 [compose.yaml](compose.yaml) 保存到服务器，在文件中设置 `PUBLIC_ORIGIN`（如 `https://mcp.example.com`）和 `volumes.source`。按 [运维指南](docs/production.md#1-首次部署) 准备数据目录。
-2. 执行以下命令启动服务：
+1. 先在 Google Cloud Console 创建 **Web 应用** OAuth 客户端，将回调地址设为 `https://mcp.example.com/auth/google/callback`（详见 [生产部署与运维指南](docs/production.md#1-首次部署) · [English](docs/production.en.md)）。
+2. 将 [compose.yaml](compose.yaml) 保存到服务器，在同目录的 `.env`（权限 `0600`）中配置 `PUBLIC_ORIGIN`（如 `https://mcp.example.com`）、`GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET`、`ADMIN_GOOGLE_EMAILS` 与 `TRUST_PROXY=1`，并按 [部署指南](docs/production.md#1-首次部署) 准备 `./data` 目录。
+3. 执行以下命令启动服务：
 
 ```sh
 docker compose up -d --wait
 ```
 
-3. 首次启动时，Gateway 会自动创建管理员账号 `admin` 及 **8 位随机密码**，同时打印到控制台并写入 `data/logs/YYYYMMDD-HHmm.log`（按大小自动分段存储，可通过 `LOG_DIR`、`LOG_MAX_BYTES`、`LOG_MAX_FILES` 调整）：
-
-```sh
-docker compose logs gateway | grep "username=admin"
-```
-
-4. 在宿主机 Nginx 为域名配置证书并代理到 `127.0.0.1:8787`。配置示例见 [remote-command.conf](deploy/nginx/remote-command.conf)。使用 `admin` 和初始密码登录域名下的 `/manage`。
+4. 在宿主机 Nginx 为域名配置证书并代理到 `127.0.0.1:8787`。配置示例见 [remote-command.conf](deploy/nginx/remote-command.conf)。运行日志写入 `data/logs/YYYYMMDD-HHmm.log`（按大小自动分段存储，可通过 `LOG_DIR`、`LOG_MAX_BYTES`、`LOG_MAX_FILES` 调整）。部署完成后访问 `https://mcp.example.com/manage`，通过 **Google 账号** 完成首个管理员初始化注册与登录。
 
 > [!IMPORTANT]
 > 若宿主机 Nginx（如宝塔面板）包含 `location ~ \.well-known` 静态目录规则，会拦截 OAuth 自动发现请求返回 404。请增加优先前缀匹配，将 `/.well-known/oauth-` 转发给 Gateway：
@@ -103,7 +98,7 @@ npx --yes --ignore-scripts --package=./remote-command-0.5.3.tgz remote-command r
 
 1. 在支持自定义 MCP 的 ChatGPT 网页端或 Codex 中，添加 MCP Server URL：`https://mcp.example.com/mcp`。
 2. 认证方式选择 **OAuth**。客户端会自动发现 `/.well-known/oauth-protected-resource/mcp` 与 `/.well-known/oauth-authorization-server`，并通过 `/oauth/register` 自动完成动态客户端注册（DCR）与配置回填，**无需手动填写 Client ID、Client Secret 或回调地址**（同时兼容 ChatGPT 网页端与 Codex 本地回环回调）。
-3. 跳转到 Gateway 授权页时，使用管理员账号（`admin`）与密码登录并确认授权。
+3. 跳转到 Gateway 授权页时，使用你的 **Google 账号** 登录并确认授权（若当前浏览器已登录 `/manage`，可直接点击继续）。
 4. 在对话中先调用 `list_devices` 查看设备，再通过 `select_device` 或工具参数 `device_id` 指定目标。只有一台设备在线时会自动选中。
 
 ---
@@ -254,7 +249,8 @@ RCM_TEST_TLS=1 RCM_TEST_TTY=1 npm test
 | 文档 | 内容说明 |
 | --- | --- |
 | [架构说明](docs/architecture.md) | Gateway、Agent 与核心执行器的整体架构设计 |
-| [离线部署与升级](docs/production.md) | 生产环境部署、镜像打包与升级步骤 |
+| [开发环境部署](docs/development.md)（[EN](docs/development.en.md)） | 本地 Gateway、Cloudflare Tunnel、Google OIDC 与联调排查指南 |
+| [生产部署与运维](docs/production.md)（[EN](docs/production.en.md)） | 生产环境部署、Google OAuth、Nginx、镜像打包与备份恢复 |
 | [客户端分析](docs/client-analysis.md) | 官方客户端配对与工具转发机制分析 |
 | [官方架构核对](docs/official-architecture.md) | 传输实现与自建方案差异对比 |
 | [验证记录](docs/verification.md) | 测试环境与完整验收结果记录 |
