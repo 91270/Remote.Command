@@ -38,17 +38,11 @@ Gateway 已统一采用 **Google OIDC** 鉴权，不再使用本地账号密码�
 
 1. 在服务器创建专用部署目录，并保存仓库中的 [compose.yaml](../compose.yaml)（包含独立 `remote-command-<版本>-compose.yaml` 的 Release 也可直接下载重命名为 `compose.yaml`）。若 GHCR 镜像包为私有，先用具备 `read:packages` 权限的账号执行 `docker login ghcr.io`。
 
-2. 在与 `compose.yaml` 同目录创建受保护的 `.env` 文件（Docker Compose 会自动读取，**切勿将真实密钥直接硬编码进版本控制中的 YAML 或提交到 Git**）：
+2. 参考模板 [deploy/production.env.example](../deploy/production.env.example)，在与 `compose.yaml` 同目录创建受保护的 `.env` 文件（Docker Compose 会自动读取，**切勿将真实密钥直接硬编码进版本控制中的 YAML 或提交到 Git**）：
 
 ```sh
-umask 077 && cat > .env <<'EOF'
-PUBLIC_ORIGIN=https://mcp.example.com
-GOOGLE_CLIENT_ID=你的生产-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=你的生产-client-secret
-ADMIN_GOOGLE_EMAILS=owner@example.com
-TRUST_PROXY=1
-EOF
-chmod 600 .env
+cp deploy/production.env.example .env && chmod 600 .env
+# 编辑 .env，填入生产 PUBLIC_ORIGIN、GOOGLE_CLIENT_ID、GOOGLE_CLIENT_SECRET、ADMIN_GOOGLE_EMAILS 与 TRUST_PROXY=1
 ```
 
    - **`ADMIN_GOOGLE_EMAILS`（强烈建议填写）**：指定首个允许初始化注册为管理员的 Google 邮箱（多个用英文逗号分隔）。若留空，空库状态下第一个完成 Google 登录的人将成为管理员。

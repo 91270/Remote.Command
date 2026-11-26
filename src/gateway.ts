@@ -34,8 +34,14 @@ function runtimeSecret(value: string | undefined, file: string | undefined, pers
     writeFileSync(candidate, generated + '\n', { flag: 'wx', mode: 0o600, flush: true });
     try { linkSync(candidate, persistentFile); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      return readFileSync(persistentFile, 'utf8').trim();
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') return readFileSync(persistentFile, 'utf8').trim();
+      if (code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'EXDEV' && code !== 'EPERM') throw error;
+      try { writeFileSync(persistentFile, generated + '\n', { flag: 'wx', mode: 0o600, flush: true }); }
+      catch (writeError) {
+        if ((writeError as NodeJS.ErrnoException).code !== 'EEXIST') throw writeError;
+        return readFileSync(persistentFile, 'utf8').trim();
+      }
     }
     return generated;
   } finally { rmSync(staging, { recursive: true, force: true }); }

@@ -57,23 +57,23 @@ Gateway 对 `PUBLIC_ORIGIN` 有严格校验（见 [protocol.ts](../src/protocol.
 
 ## 3. 步骤 1：安装 `cloudflared` 并配置 Cloudflare Tunnel
 
-### 3.1 安装 `cloudflared`
+### 3.1 安装 `cloudflared`（Windows / macOS / Linux）
 
-- **macOS**：
-  - 若 Homebrew 可用且支持当前系统版本：`brew install cloudflared`
-  - 若系统较新或无 Homebrew 预编译瓶（避免触发从源码编译 Go），可直接从 [Cloudflare Releases](https://github.com/cloudflare/cloudflared/releases) 下载对应架构的 `cloudflared-darwin-amd64.tgz` 或 `cloudflared-darwin-arm64.tgz`，解压并安装到 `~/.local/bin/cloudflared`（确保 `~/.local/bin` 在 `PATH` 中）：
+仓库已内置跨平台脚本 [scripts/dev-local.mjs](../scripts/dev-local.mjs)（与封装入口 [scripts/dev-local.sh](../scripts/dev-local.sh) / [scripts/dev-local.ps1](../scripts/dev-local.ps1)），支持 **Windows (`amd64` / `386`)、macOS (`amd64` / `arm64`)、Linux (`amd64` / `arm64`)** 一键下载安装 Cloudflare 官方预编译二进制包到 `~/.local/bin/cloudflared`（Windows 为 `%USERPROFILE%\.local\bin\cloudflared.exe`），无需手动编译或配置包管理器：
 
-```bash
-# 以 macOS x86_64 (amd64) 为例；Apple Silicon 请替换为 arm64
-tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT
-curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz -o "$tmp/cloudflared.tgz"
-tar -xzf "$tmp/cloudflared.tgz" -C "$tmp"
-install -d -m 0755 "$HOME/.local/bin"
-install -m 0755 "$tmp/cloudflared" "$HOME/.local/bin/cloudflared"
-cloudflared --version
-```
+- **macOS / Linux**：
+  ```bash
+  ./scripts/dev-local.sh install-tunnel
+  # 强制更新到最新版：./scripts/dev-local.sh install-tunnel --force
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  .\scripts\dev-local.ps1 install-tunnel
+  # 强制更新到最新版：.\scripts\dev-local.ps1 install-tunnel --force
+  ```
 
-- **Linux**：参考 [Cloudflare 官方安装说明](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) 安装后确认 `cloudflared --version` 正常。
+> [!TIP]
+> 首次直接运行启动脚本时，如果本机尚未安装 `cloudflared`，也会自动触发下载安装。若偏好手动安装，可前往 [Cloudflare Releases](https://github.com/cloudflare/cloudflared/releases) 下载对应平台包。
 
 ### 3.2 在 Cloudflare Zero Trust 创建隧道
 
@@ -121,112 +121,65 @@ cloudflared --version
 
 ## 5. 步骤 3：准备本地环境变量与一键启动
 
-### 5.1 创建 `state/local-test.env`（不入库）
+### 5.1 从脱敏模板创建 `state/local-test.env`（不入库）
 
-在仓库根目录执行以下命令创建私密测试配置文件：
+仓库根目录已提供脱敏模板 [local-test.env.example](../local-test.env.example)。在仓库根目录复制到 `.gitignore` 忽略的 `state/` 目录中：
 
-```bash
-install -d -m 0700 state
-umask 077 && cat > state/local-test.env <<'EOF'
-# 本地测试环境变量（已被 .gitignore 忽略，切勿提交到 Git）
-PUBLIC_ORIGIN="https://dev-mcp.example.com"
-BIND_HOST="127.0.0.1"
-PORT="8787"
-TRUST_PROXY="1"
-STATE_DB="./state/local-test.sqlite"
+- **macOS / Linux**：
+  ```bash
+  install -d -m 0700 state
+  cp local-test.env.example state/local-test.env
+  chmod 600 state/local-test.env
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  New-Item -ItemType Directory -Force state | Out-Null
+  Copy-Item local-test.env.example state\local-test.env
+  ```
 
-# Google Cloud Console -> Clients (Web application) 获取
-GOOGLE_CLIENT_ID="你的-client-id.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET="你的-client-secret"
+编辑 `state/local-test.env`，填入你的真实配置：
 
-# 强烈建议填写你自己的 Google 邮箱（多个逗号分隔），锁定首个管理员注册权限
-ADMIN_GOOGLE_EMAILS="owner@example.com"
-
-# Cloudflare Zero Trust Dashboard 获取的 Tunnel Token
-CLOUDFLARED_TUNNEL_TOKEN="你的-tunnel-token"
-
-# 若本机访问 accounts.google.com 需要 HTTP 代理，取消以下两行注释并填写实际端口
-# NODE_USE_ENV_PROXY="1"
-# HTTPS_PROXY="http://127.0.0.1:7890"
-EOF
-```
+- `PUBLIC_ORIGIN`：如 `"https://dev-mcp.example.com"`（必须与 Google 回调和 Cloudflare Public Hostname 一致）
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`：Google Cloud Console 获取的 Web 应用凭证
+- `ADMIN_GOOGLE_EMAILS`：你的管理员 Google 邮箱
+- `CLOUDFLARED_TUNNEL_TOKEN`：Cloudflare Zero Trust Dashboard 获取的 Tunnel Token
+- 若本机访问 `accounts.google.com` 需要 HTTP 代理，取消注释并配置 `NODE_USE_ENV_PROXY="1"` 与 `HTTPS_PROXY`
 
 <details>
 <summary>方案 B（纯本地明文）环境变量差异</summary>
 
-将 `PUBLIC_ORIGIN` 改为 `"http://127.0.0.1:8787"`、新增 `ALLOW_INSECURE_LOOPBACK="1"`、`TRUST_PROXY="0"`，并留空 `CLOUDFLARED_TUNNEL_TOKEN` 后直接运行 Gateway（需确保所使用的 OAuth Client 允许回环回调，且浏览器只访问 `http://127.0.0.1:8787/manage`）。
+将 `PUBLIC_ORIGIN` 改为 `"http://127.0.0.1:8787"`、新增 `ALLOW_INSECURE_LOOPBACK="1"`、`TRUST_PROXY="0"`，并留空 `CLOUDFLARED_TUNNEL_TOKEN` 后运行 `gateway` 子命令（需确保所使用的 OAuth Client 允许回环回调，且浏览器只访问 `http://127.0.0.1:8787/manage`）。
 
 </details>
 
-### 5.2 手动分别启动（两终端）
+### 5.2 使用仓库跨平台脚本一键启动
 
-```bash
-# 终端 1：启动 Cloudflare Tunnel（通过环境变量传入 Token，避免出现在 ps 进程参数中）
-set -a && source state/local-test.env && set +a
-env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run
+- **macOS / Linux**：
+  ```bash
+  # 安装隧道（如尚未安装，启动 all/tunnel 时也会自动安装）
+  ./scripts/dev-local.sh install-tunnel
 
-# 终端 2：启动本地 Gateway（剥离 Tunnel Token，避免 Gateway 子进程接触）
-set -a && source state/local-test.env && set +a
-env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-```
+  # 一键同时启动 Cloudflare Tunnel 与本地 Gateway（按 Ctrl+C 一并停止）
+  ./scripts/dev-local.sh
 
-### 5.3 一键启动脚本（推荐，兼容 macOS / Linux）
+  # 分开调试：
+  ./scripts/dev-local.sh tunnel
+  ./scripts/dev-local.sh gateway
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  # 安装隧道（如尚未安装，启动 all/tunnel 时也会自动安装）
+  .\scripts\dev-local.ps1 install-tunnel
 
-可将下面脚本保存为 `state/start-local-test.sh`（同样被 `.gitignore` 忽略）并赋权 `chmod 0700 state/start-local-test.sh`：
+  # 一键同时启动 Cloudflare Tunnel 与本地 Gateway（按 Ctrl+C 一并停止）
+  .\scripts\dev-local.ps1
 
-```bash
-#!/bin/bash
-set -euo pipefail
+  # 分开调试：
+  .\scripts\dev-local.ps1 tunnel
+  .\scripts\dev-local.ps1 gateway
+  ```
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$ROOT_DIR/state/local-test.env"
-export PATH="$HOME/.local/bin:$PATH"
-
-MODE="${1:-all}"
-if [ "$MODE" = "-h" ] || [ "$MODE" = "--help" ]; then
-  echo "用法: ./state/start-local-test.sh [all|tunnel|gateway]"
-  exit 0
-fi
-
-set -a
-source "$ENV_FILE"
-set +a
-
-if [ ! -f "$ROOT_DIR/dist/gateway.js" ]; then
-  (cd "$ROOT_DIR" && npm run build)
-fi
-
-TUNNEL_PID=""
-cleanup() {
-  if [ -n "${TUNNEL_PID:-}" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
-    kill "$TUNNEL_PID" 2>/dev/null || true
-    wait "$TUNNEL_PID" 2>/dev/null || true
-  fi
-}
-
-case "$MODE" in
-  tunnel)
-    exec env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run
-    ;;
-  gateway)
-    cd "$ROOT_DIR"
-    exec env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-    ;;
-  all)
-    trap cleanup INT TERM EXIT
-    env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run &
-    TUNNEL_PID=$!
-    cd "$ROOT_DIR"
-    env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-    ;;
-  *)
-    echo "未知子命令: $MODE" >&2
-    exit 2
-    ;;
-esac
-```
-
-运行 `./state/start-local-test.sh` 即可同时拉起隧道与 Gateway，按 `Ctrl+C` 一并停止。
+> 安全细节：脚本通过环境变量 `TUNNEL_TOKEN` 向 `cloudflared` 传递隧道令牌（不会暴露在 `ps` / 命令行参数中），并在启动 `node dist/gateway.js` 时主动剥离该变量。若 `dist/gateway.js` 尚未编译，脚本会自动先执行 `npm run build`。
 
 ---
 

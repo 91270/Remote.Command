@@ -57,23 +57,23 @@ The steps below follow **Plan A**; Plan B overrides are noted inline.
 
 ## 3. Step 1: Install `cloudflared` and Create a Cloudflare Tunnel
 
-### 3.1 Install `cloudflared`
+### 3.1 Install `cloudflared` (Windows / macOS / Linux)
 
-- **macOS**:
-  - If Homebrew provides bottles for your macOS version: `brew install cloudflared`
-  - If Homebrew attempts a source build of Go (e.g. unsupported macOS bottle), install the official prebuilt macOS release tarball from [Cloudflare Releases](https://github.com/cloudflare/cloudflared/releases) into `~/.local/bin/cloudflared` (ensure `~/.local/bin` is on `PATH`):
+The repository ships a cross-platform helper [scripts/dev-local.mjs](../scripts/dev-local.mjs) with thin wrappers ([scripts/dev-local.sh](../scripts/dev-local.sh) and [scripts/dev-local.ps1](../scripts/dev-local.ps1)) that automatically downloads official prebuilt `cloudflared` binaries for **Windows (`amd64` / `386`), macOS (`amd64` / `arm64`), and Linux (`amd64` / `arm64`)** into `~/.local/bin/cloudflared` (`%USERPROFILE%\.local\bin\cloudflared.exe` on Windows):
 
-```bash
-# Example for macOS x86_64 (amd64); replace with arm64 on Apple Silicon
-tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT
-curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz -o "$tmp/cloudflared.tgz"
-tar -xzf "$tmp/cloudflared.tgz" -C "$tmp"
-install -d -m 0755 "$HOME/.local/bin"
-install -m 0755 "$tmp/cloudflared" "$HOME/.local/bin/cloudflared"
-cloudflared --version
-```
+- **macOS / Linux**:
+  ```bash
+  ./scripts/dev-local.sh install-tunnel
+  # Force-upgrade later: ./scripts/dev-local.sh install-tunnel --force
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  .\scripts\dev-local.ps1 install-tunnel
+  # Force-upgrade later: .\scripts\dev-local.ps1 install-tunnel --force
+  ```
 
-- **Linux**: Follow the [official Cloudflare downloads guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and verify `cloudflared --version`.
+> [!TIP]
+> Running the launcher for `all` or `tunnel` also auto-installs `cloudflared` if it is not already installed. Manual downloads remain available from [Cloudflare Releases](https://github.com/cloudflare/cloudflared/releases).
 
 ### 3.2 Create the Tunnel in Cloudflare Zero Trust
 
@@ -121,112 +121,65 @@ cloudflared --version
 
 ## 5. Step 3: Local Environment & Quick-Start Script
 
-### 5.1 Create `state/local-test.env` (Gitignored)
+### 5.1 Copy the Sanitized Template to `state/local-test.env`
 
-Create a private configuration file under `state/`:
+Copy the tracked template [local-test.env.example](../local-test.env.example) into the `.gitignore`-excluded `state/` directory:
 
-```bash
-install -d -m 0700 state
-umask 077 && cat > state/local-test.env <<'EOF'
-# Local test environment (ignored by .gitignore — never commit to Git)
-PUBLIC_ORIGIN="https://dev-mcp.example.com"
-BIND_HOST="127.0.0.1"
-PORT="8787"
-TRUST_PROXY="1"
-STATE_DB="./state/local-test.sqlite"
+- **macOS / Linux**:
+  ```bash
+  install -d -m 0700 state
+  cp local-test.env.example state/local-test.env
+  chmod 600 state/local-test.env
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  New-Item -ItemType Directory -Force state | Out-Null
+  Copy-Item local-test.env.example state\local-test.env
+  ```
 
-# From Google Cloud Console -> Clients (Web application)
-GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
-GOOGLE_CLIENT_SECRET="your-client-secret"
+Edit `state/local-test.env` with your local values:
 
-# Recommended: lock initial admin registration to your own Google email(s)
-ADMIN_GOOGLE_EMAILS="owner@example.com"
-
-# Tunnel token from Cloudflare Zero Trust Dashboard
-CLOUDFLARED_TUNNEL_TOKEN="your-tunnel-token"
-
-# Uncomment if local Node.js needs an HTTP proxy to reach accounts.google.com
-# NODE_USE_ENV_PROXY="1"
-# HTTPS_PROXY="http://127.0.0.1:7890"
-EOF
-```
+- `PUBLIC_ORIGIN`: e.g. `"https://dev-mcp.example.com"` (must match both Google redirect URI and Cloudflare Public Hostname)
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`: credentials from Google Cloud Console
+- `ADMIN_GOOGLE_EMAILS`: your admin Google email address
+- `CLOUDFLARED_TUNNEL_TOKEN`: Tunnel token from Cloudflare Zero Trust Dashboard
+- If local Node.js needs an HTTP proxy to reach `accounts.google.com`, uncomment `NODE_USE_ENV_PROXY="1"` and `HTTPS_PROXY`
 
 <details>
 <summary>Plan B (Plaintext Loopback) Override</summary>
 
-Set `PUBLIC_ORIGIN="http://127.0.0.1:8787"`, add `ALLOW_INSECURE_LOOPBACK="1"`, set `TRUST_PROXY="0"`, leave `CLOUDFLARED_TUNNEL_TOKEN` empty, and run the Gateway directly (ensure your OAuth client permits loopback redirects and always open `http://127.0.0.1:8787/manage`, not `localhost`).
+Set `PUBLIC_ORIGIN="http://127.0.0.1:8787"`, add `ALLOW_INSECURE_LOOPBACK="1"`, set `TRUST_PROXY="0"`, leave `CLOUDFLARED_TUNNEL_TOKEN` empty, and run the `gateway` subcommand (ensure your OAuth client permits loopback redirects and always open `http://127.0.0.1:8787/manage`, not `localhost`).
 
 </details>
 
-### 5.2 Start in Two Terminals
+### 5.2 Start with the Cross-Platform Helper Script
 
-```bash
-# Terminal 1: Start Cloudflare Tunnel (passed via env var so the token stays out of `ps` args)
-set -a && source state/local-test.env && set +a
-env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run
+- **macOS / Linux**:
+  ```bash
+  # Install cloudflared standalone (also auto-runs when starting all/tunnel)
+  ./scripts/dev-local.sh install-tunnel
 
-# Terminal 2: Start local Gateway (strip tunnel token from Gateway env)
-set -a && source state/local-test.env && set +a
-env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-```
+  # Start both Cloudflare Tunnel and local Gateway together (Ctrl+C stops both)
+  ./scripts/dev-local.sh
 
-### 5.3 Combined Quick-Start Wrapper (Optional)
+  # Or run in separate terminals:
+  ./scripts/dev-local.sh tunnel
+  ./scripts/dev-local.sh gateway
+  ```
+- **Windows (PowerShell)**:
+  ```powershell
+  # Install cloudflared standalone (also auto-runs when starting all/tunnel)
+  .\scripts\dev-local.ps1 install-tunnel
 
-Save the following script to `state/start-local-test.sh` (also ignored by `.gitignore`) and make it executable (`chmod 0700 state/start-local-test.sh`):
+  # Start both Cloudflare Tunnel and local Gateway together (Ctrl+C stops both)
+  .\scripts\dev-local.ps1
 
-```bash
-#!/bin/bash
-set -euo pipefail
+  # Or run in separate terminals:
+  .\scripts\dev-local.ps1 tunnel
+  .\scripts\dev-local.ps1 gateway
+  ```
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ENV_FILE="$ROOT_DIR/state/local-test.env"
-export PATH="$HOME/.local/bin:$PATH"
-
-MODE="${1:-all}"
-if [ "$MODE" = "-h" ] || [ "$MODE" = "--help" ]; then
-  echo "Usage: ./state/start-local-test.sh [all|tunnel|gateway]"
-  exit 0
-fi
-
-set -a
-source "$ENV_FILE"
-set +a
-
-if [ ! -f "$ROOT_DIR/dist/gateway.js" ]; then
-  (cd "$ROOT_DIR" && npm run build)
-fi
-
-TUNNEL_PID=""
-cleanup() {
-  if [ -n "${TUNNEL_PID:-}" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
-    kill "$TUNNEL_PID" 2>/dev/null || true
-    wait "$TUNNEL_PID" 2>/dev/null || true
-  fi
-}
-
-case "$MODE" in
-  tunnel)
-    exec env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run
-    ;;
-  gateway)
-    cd "$ROOT_DIR"
-    exec env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-    ;;
-  all)
-    trap cleanup INT TERM EXIT
-    env TUNNEL_TOKEN="$CLOUDFLARED_TUNNEL_TOKEN" cloudflared tunnel run &
-    TUNNEL_PID=$!
-    cd "$ROOT_DIR"
-    env -u CLOUDFLARED_TUNNEL_TOKEN -u TUNNEL_TOKEN node dist/gateway.js
-    ;;
-  *)
-    echo "Unknown subcommand: $MODE" >&2
-    exit 2
-    ;;
-esac
-```
-
-Run `./state/start-local-test.sh` to start both processes together; press `Ctrl+C` to stop both cleanly.
+> Security note: the script passes `TUNNEL_TOKEN` via environment variable to `cloudflared` (keeping it out of process command-line arguments) and strips tunnel token variables before starting `node dist/gateway.js`. If `dist/gateway.js` is missing, `npm run build` runs automatically.
 
 ---
 

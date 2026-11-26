@@ -38,17 +38,11 @@ The Gateway exclusively authenticates users via **Google OIDC** (no local passwo
 
 1. Create a deployment directory on the server and place [compose.yaml](../compose.yaml) there (or download `remote-command-<version>-compose.yaml` from a GitHub Release and save it as `compose.yaml`). If your GHCR package is private, authenticate with `docker login ghcr.io` using a token with `read:packages`.
 
-2. Create a protected `.env` file beside `compose.yaml` (automatically read by Docker Compose; **never hardcode real secrets into tracked YAML files or commit `.env` to Git**):
+2. Copy [deploy/production.env.example](../deploy/production.env.example) to `.env` beside `compose.yaml` and restrict permissions (automatically read by Docker Compose; **never hardcode real secrets into tracked YAML files or commit `.env` to Git**):
 
 ```sh
-umask 077 && cat > .env <<'EOF'
-PUBLIC_ORIGIN=https://mcp.example.com
-GOOGLE_CLIENT_ID=your-prod-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-prod-client-secret
-ADMIN_GOOGLE_EMAILS=owner@example.com
-TRUST_PROXY=1
-EOF
-chmod 600 .env
+cp deploy/production.env.example .env && chmod 600 .env
+# Edit .env with your production PUBLIC_ORIGIN, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ADMIN_GOOGLE_EMAILS, and TRUST_PROXY=1
 ```
 
    - **`ADMIN_GOOGLE_EMAILS` (strongly recommended)**: Comma-separated list of Google emails allowed to claim the initial admin role on an empty database. If left empty, the very first Google user to sign in becomes admin.
