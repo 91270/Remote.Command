@@ -627,3 +627,85 @@ test('dashboard deletes individual revoked devices and clears revoked devices pe
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('dashboard sets approvalMode at invite/pairing time and switches it live per device with tenant isolation', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-approval-mode-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const aliceRes = store.createGoogleUser({ sub: 'sub-alice-am', email: 'alice-am@example.com', displayName: 'Alice', avatarUrl: null, adminEmails: new Set() });
+  store.setRegistrationMode('open');
+  const bobRes = store.createGoogleUser({ sub: 'sub-bob-am', email: 'bob-am@example.com', displayName: 'Bob', avatarUrl: null, adminEmails: new Set() });
+  const alice = aliceRes.user;
+  const bob = bobRes.user;
+  const verified = [];
+  const server = createServer(async (req, res) => {
+    try {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const d = new Dashboard(store, { origin }, {
+        preview() { return undefined; },
+        verify(code, name, caps, approve, userId, approvalMode) {
+          verified.push({ code, approvalMode });
+          return { status: 'approved', deviceName: name || 'Device' };
+        }
+      });
+      if (!await d.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
+    } catch { res.writeHead(500).end('Internal failure'); }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const session = user => {
+    const token = secret();
+    const csrf = secret();
+    store.putAuth(token, 'dashboard', 3600000, { csrf, userId: user.id, username: user.email, role: user.role });
+    return (path, data, overrides = {}) => fetch(origin + '/manage' + path, {
+      ...(data !== undefined && { method: 'POST', body: JSON.stringify(data) }),
+      headers: {
+        ...(data !== undefined && { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }),
+        Cookie: `rcm_dashboard=${token}`,
+        ...overrides
+      }
+    });
+  };
+  const asAlice = session(alice);
+  const asBob = session(bob);
+  try {
+    // Pairing-time selection through device-verify
+    assert.equal((await asAlice('/api/device-verify', { user_code: 'ABCD-EFGH', capabilities: ['read'], approve: true, approvalMode: 'exec-only' })).status, 200);
+    assert.equal(verified[0].approvalMode, 'exec-only');
+    assert.equal((await asAlice('/api/device-verify', { user_code: 'ABCD-EFGH', capabilities: ['read'], approve: true, approvalMode: 'nonsense' })).status, 400);
+    assert.equal((await asAlice('/api/device-verify', { user_code: 'ABCD-EFGH', capabilities: ['read'], approve: true })).status, 200);
+    assert.equal(verified[1].approvalMode, 'client');
+
+    // Invite-time selection persists onto the paired device
+    const invite = await (await asAlice('/api/invites', { name: 'Strict box', capabilities: ['read', 'write'], approvalMode: 'strict' })).json();
+    assert.equal(invite.approvalMode, 'strict');
+    const paired = store.pair(invite.token, secret());
+    assert.equal(paired.approvalMode, 'strict');
+    assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'strict');
+
+    // Live switching is reflected on both the heartbeat fast path and the full sync path
+    const boot = randomUUID();
+    assert.equal(store.sync(paired.id, boot, 'linux', []).approvalMode, 'strict');
+    assert.equal(store.sync(paired.id, boot, 'linux', []).approvalMode, 'strict');
+    assert.equal((await asAlice(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'client' }, { 'X-CSRF-Token': secret() })).status, 403);
+    assert.equal((await asAlice(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'bogus' })).status, 400);
+    const switched = await asAlice(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'client' });
+    assert.equal(switched.status, 200);
+    assert.deepEqual(await switched.json(), { ok: true, approvalMode: 'client' });
+    assert.equal(store.sync(paired.id, boot, 'linux', []).approvalMode, 'client');
+    assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'client');
+
+    // Tenant isolation and revoked devices
+    assert.equal((await asBob(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'strict' })).status, 404);
+    assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'client');
+    store.revoke(paired.id, alice.id);
+    assert.equal((await asAlice(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'strict' })).status, 404);
+
+    const audit = await (await asAlice('/api/audit')).json();
+    assert.equal(audit.records.some(r => r.event === 'device_approval_mode_updated' && r.details.approvalMode === 'client'), true);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});

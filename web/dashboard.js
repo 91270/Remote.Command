@@ -9,6 +9,11 @@ const labels = {
   succeeded: '已完成', failed: '失败', denied: '已拒绝', cancelled: '已取消', timed_out: '已超时', interrupted: '已中断'
 };
 const capabilityNames = { read: '读取', write: '写入', exec: '命令' };
+const approvalModeLabels = {
+  client: '信任客户端',
+  'exec-only': '仅命令二次确认',
+  strict: '写与命令二次确认'
+};
 const platformNames = { darwin: 'macOS', win32: 'Windows', linux: 'Linux', android: 'Android' };
 const panels = {
   devices: ['设备', '通过 Remote MCP 让 AI 客户端安全访问你的电脑。'],
@@ -482,12 +487,35 @@ function renderDevices() {
     info.appendChild(title);
 
     const capsText = (device.capabilities || []).map(c => capabilityNames[c] || c).join(' · ');
+    const modeValue = approvalModeLabels[device.approvalMode] ? device.approvalMode : 'client';
     const seenText = device.online ? '当前在线' : `最后在线 ${relativeTime(device.lastSeen)}`;
-    info.appendChild(node('div', 'device-meta', `${seenText} · 权限：${capsText || '只读'}`));
+    info.appendChild(node('div', 'device-meta', `${seenText} · 权限：${capsText || '只读'} · 审批：${approvalModeLabels[modeValue]}`));
     main.appendChild(info);
 
     const actions = node('div', 'device-actions');
     if (!device.revoked) {
+      const modeSelect = document.createElement('select');
+      modeSelect.className = 'approval-select';
+      modeSelect.setAttribute('aria-label', `${device.name} 本机二次审批策略`);
+      for (const [val, text] of Object.entries(approvalModeLabels)) {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = text;
+        modeSelect.appendChild(opt);
+      }
+      modeSelect.value = modeValue;
+      modeSelect.addEventListener('change', async () => {
+        const nextMode = modeSelect.value;
+        try {
+          await api(`devices/${device.id}/approval-mode`, { approvalMode: nextMode });
+          notice(`已将「${device.name}」审批策略切换为「${approvalModeLabels[nextMode]}」（即时生效）。`);
+          await refresh();
+        } catch (err) {
+          modeSelect.value = modeValue;
+          notice(err.message, true);
+        }
+      });
+      actions.appendChild(modeSelect);
       if (!device.online) {
         actions.appendChild(button('重连', 'primary', () => openDeviceDialog({ mode: 'reconnect', device })));
       }
@@ -772,7 +800,8 @@ async function submitDeviceDecision(approve) {
   const data = new FormData(byId('verify-form'));
   const caps = data.getAll('capabilities');
   const name = (data.get('name') || '').toString().trim() || undefined;
-  const res = await api('device-verify', { user_code: verifiedCode, name, capabilities: caps.length ? caps : ['read'], approve });
+  const approvalMode = (data.get('approvalMode') || 'client').toString();
+  const res = await api('device-verify', { user_code: verifiedCode, name, capabilities: caps.length ? caps : ['read'], approve, approvalMode });
   byId('verify-dialog').close();
   if (approve) {
     pendingOnlineDeviceName = res.deviceName || '';
@@ -998,7 +1027,8 @@ byId('pair-form').addEventListener('submit', event => {
   event.preventDefault();
   act(async () => {
     const data = new FormData(event.target);
-    const reply = await api('invites', { name: data.get('name'), capabilities: data.getAll('capabilities') });
+    const approvalMode = (data.get('approvalMode') || 'client').toString();
+    const reply = await api('invites', { name: data.get('name'), capabilities: data.getAll('capabilities'), approvalMode });
     byId('pair-token').textContent = reply.token;
     byId('pair-expiry').textContent = '有效期至 ' + formatTime(reply.expiresAt);
     byId('pair-form').hidden = true;

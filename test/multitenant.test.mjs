@@ -140,7 +140,7 @@ test('in-memory liveSeen heartbeat avoids DB writes on steady sync and flushes o
 
     await new Promise(r => setTimeout(r, 25));
     const reply = store.sync(dev.id, boot, 'linux', []);
-    assert.deepEqual(reply, { jobs: [], cancel: [], ack: [] });
+    assert.deepEqual(reply, { jobs: [], cancel: [], ack: [], approvalMode: 'client' });
     // Fast path should NOT have updated DB seen yet
     const dbSeenDuringFastPath = Number(store.db.prepare('SELECT seen FROM devices WHERE id=?').get(dev.id).seen);
     assert.equal(dbSeenDuringFastPath, initialDbSeen);

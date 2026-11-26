@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { serviceDefinition } from '../dist/agent-service.js';
+import { approvalModes, needsLocalApproval } from '../dist/protocol.js';
 
 test('service manifests preserve paths and supervise the Agent as a regular user', () => {
   const unit = serviceDefinition('linux', 'test-unit', '/opt/node', '/opt/rcm cli.js', '/Users/sample %t/$HOME/agent.json');
@@ -60,4 +61,19 @@ test('remote CLI reads only the current default configuration or an explicit pat
     assert.equal(explicit.status, 1);
     assert.match(explicit.stderr, /JSON/);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('needsLocalApproval maps approval modes to capabilities', () => {
+  assert.deepEqual(approvalModes, ['client', 'exec-only', 'strict']);
+  assert.equal(needsLocalApproval('client', 'read'), false);
+  assert.equal(needsLocalApproval('client', 'write'), false);
+  assert.equal(needsLocalApproval('client', 'exec'), false);
+
+  assert.equal(needsLocalApproval('exec-only', 'read'), false);
+  assert.equal(needsLocalApproval('exec-only', 'write'), false);
+  assert.equal(needsLocalApproval('exec-only', 'exec'), true);
+
+  assert.equal(needsLocalApproval('strict', 'read'), false);
+  assert.equal(needsLocalApproval('strict', 'write'), true);
+  assert.equal(needsLocalApproval('strict', 'exec'), true);
 });

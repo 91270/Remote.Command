@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
@@ -11,9 +11,12 @@ const liveSql = "('dispatched','awaiting_approval','running')";
 const outstandingSql = "('queued','dispatched','awaiting_approval','running')";
 const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interrupted')";
 const operationPlaceholders = names.map(() => '?').join(',');
+const normalizeApprovalMode = (raw: unknown): ApprovalMode =>
+  typeof raw === 'string' && approvalModes.some(m => m === raw) ? (raw as ApprovalMode) : 'client';
 
 type DeviceRow = {
   id: string; user_id: string | null; name: string; credential: string; caps: string;
+  approval_mode?: string | null;
   boot: string | null; seen: number | null; last_seen: number | null; platform: string | null; revoked: number;
 };
 type TaskRow = {
@@ -86,9 +89,9 @@ export class Store {
     this.db = new DatabaseSync(file);
     this.db.exec(`PRAGMA trusted_schema = OFF; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, credential TEXT UNIQUE NOT NULL,
-        caps TEXT NOT NULL, boot TEXT, seen INTEGER, last_seen INTEGER, platform TEXT, revoked INTEGER NOT NULL DEFAULT 0);
+        caps TEXT NOT NULL, approval_mode TEXT NOT NULL DEFAULT 'client', boot TEXT, seen INTEGER, last_seen INTEGER, platform TEXT, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS retired_boots (device TEXT NOT NULL, boot TEXT NOT NULL, PRIMARY KEY(device, boot));
-      CREATE TABLE IF NOT EXISTS invites (digest TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, caps TEXT NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS invites (digest TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL, caps TEXT NOT NULL, approval_mode TEXT NOT NULL DEFAULT 'client', expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, user_id TEXT, device TEXT NOT NULL, op TEXT NOT NULL, args TEXT NOT NULL,
         status TEXT NOT NULL, boot TEXT, created INTEGER NOT NULL, changed INTEGER NOT NULL, deadline INTEGER NOT NULL,
         cancel INTEGER NOT NULL DEFAULT 0, output TEXT, seq INTEGER NOT NULL DEFAULT 0);
@@ -139,7 +142,9 @@ export class Store {
         this.db.exec('UPDATE devices SET last_seen=seen WHERE seen>0');
       }
       this.ensureColumn('devices', 'user_id', 'TEXT');
+      this.ensureColumn('devices', 'approval_mode', "TEXT NOT NULL DEFAULT 'client'");
       this.ensureColumn('invites', 'user_id', 'TEXT');
+      this.ensureColumn('invites', 'approval_mode', "TEXT NOT NULL DEFAULT 'client'");
       this.ensureColumn('audit', 'user_id', 'TEXT');
 
       this.ensureColumn('users', 'status', "TEXT NOT NULL DEFAULT 'active'");
@@ -492,44 +497,45 @@ export class Store {
 
   // --- Devices & Pairing ---
 
-  invite(name: string, caps: Capability[], userId?: string): string {
+  invite(name: string, caps: Capability[], userId?: string, approvalMode: ApprovalMode = 'client'): string {
     return this.tx(() => {
       const owner = this.resolveOwner(userId);
       const token = secret();
-      this.db.prepare('INSERT INTO invites(digest,user_id,name,caps,expires) VALUES(?,?,?,?,?)')
-        .run(hash(token), owner, name, JSON.stringify(caps), Date.now() + 600000);
-      this.audit('invite_created', { name, caps }, owner);
+      this.db.prepare('INSERT INTO invites(digest,user_id,name,caps,approval_mode,expires) VALUES(?,?,?,?,?,?)')
+        .run(hash(token), owner, name, JSON.stringify(caps), approvalMode, Date.now() + 600000);
+      this.audit('invite_created', { name, caps, approvalMode }, owner);
       return token;
     });
   }
 
   pair(token: string, credential: string) {
     return this.tx(() => {
-      const invite = this.db.prepare('DELETE FROM invites WHERE digest=? AND expires>? RETURNING user_id,name,caps')
-        .get(hash(token), Date.now()) as { user_id: string | null; name: string; caps: string } | undefined;
+      const invite = this.db.prepare('DELETE FROM invites WHERE digest=? AND expires>? RETURNING user_id,name,caps,approval_mode')
+        .get(hash(token), Date.now()) as { user_id: string | null; name: string; caps: string; approval_mode?: string | null } | undefined;
       if (!invite) return;
       const id = randomUUID();
       const owner = invite.user_id ?? this.resolveOwner();
-      this.db.prepare('INSERT INTO devices(id,user_id,name,credential,caps) VALUES(?,?,?,?,?)')
-        .run(id, owner, invite.name, hash(credential), invite.caps);
-      this.audit('device_paired', { device: id }, owner);
-      return { id, name: invite.name, userId: owner };
+      const approvalMode = normalizeApprovalMode(invite.approval_mode);
+      this.db.prepare('INSERT INTO devices(id,user_id,name,credential,caps,approval_mode) VALUES(?,?,?,?,?,?)')
+        .run(id, owner, invite.name, hash(credential), invite.caps, approvalMode);
+      this.audit('device_paired', { device: id, approvalMode }, owner);
+      return { id, name: invite.name, userId: owner, approvalMode };
     });
   }
 
-  createPairedDevice(name: string, credential: string, caps: Capability[], userId?: string) {
+  createPairedDevice(name: string, credential: string, caps: Capability[], userId?: string, approvalMode: ApprovalMode = 'client') {
     const id = randomUUID();
     const owner = this.resolveOwner(userId);
-    this.db.prepare('INSERT INTO devices(id,user_id,name,credential,caps) VALUES(?,?,?,?,?)')
-      .run(id, owner, name, hash(credential), JSON.stringify(caps));
-    this.audit('device_paired', { device: id }, owner);
-    return { id, name, userId: owner };
+    this.db.prepare('INSERT INTO devices(id,user_id,name,credential,caps,approval_mode) VALUES(?,?,?,?,?,?)')
+      .run(id, owner, name, hash(credential), JSON.stringify(caps), approvalMode);
+    this.audit('device_paired', { device: id, approvalMode }, owner);
+    return { id, name, userId: owner, approvalMode };
   }
 
   devices(userId?: string) {
     const rows = userId
-      ? this.db.prepare('SELECT id,user_id,name,caps,seen,last_seen,platform,revoked FROM devices WHERE user_id=? ORDER BY name,id').all(userId)
-      : this.db.prepare('SELECT id,user_id,name,caps,seen,last_seen,platform,revoked FROM devices ORDER BY name,id').all();
+      ? this.db.prepare('SELECT id,user_id,name,caps,approval_mode,seen,last_seen,platform,revoked FROM devices WHERE user_id=? ORDER BY name,id').all(userId)
+      : this.db.prepare('SELECT id,user_id,name,caps,approval_mode,seen,last_seen,platform,revoked FROM devices ORDER BY name,id').all();
     const now = Date.now();
     return rows.map(row => {
       const id = String(row.id);
@@ -540,6 +546,7 @@ export class Store {
         userId: row.user_id ? String(row.user_id) : null,
         name: String(row.name),
         capabilities: JSON.parse(String(row.caps)),
+        approvalMode: normalizeApprovalMode(row.approval_mode),
         platform: row.platform ? String(row.platform) : null,
         online: !row.revoked && seen > 0 && now - seen < offlineMs,
         lastSeen: lastSeen > 0 ? new Date(lastSeen).toISOString() : null,
@@ -555,6 +562,17 @@ export class Store {
         : this.db.prepare('UPDATE devices SET name=? WHERE id=? AND revoked=0').run(name, id);
       if (!res.changes) return false;
       this.audit('device_renamed', { device: id, name }, userId);
+      return true;
+    });
+  }
+
+  setDeviceApprovalMode(id: string, approvalMode: ApprovalMode, userId?: string): boolean {
+    return this.tx(() => {
+      const res = userId
+        ? this.db.prepare('UPDATE devices SET approval_mode=? WHERE id=? AND user_id=? AND revoked=0').run(approvalMode, id, userId)
+        : this.db.prepare('UPDATE devices SET approval_mode=? WHERE id=? AND revoked=0').run(approvalMode, id);
+      if (!res.changes) return false;
+      this.audit('device_approval_mode_updated', { device: id, approvalMode }, userId);
       return true;
     });
   }
@@ -811,13 +829,13 @@ export class Store {
     if (ready && updates.length === 0 && !catalog) {
       const mem = this.liveSeen.get(device);
       if (mem && mem.boot === boot && mem.platform === platform) {
-        const devCheck = this.db.prepare('SELECT boot,revoked FROM devices WHERE id=?').get(device) as { boot: string | null; revoked: number } | undefined;
+        const devCheck = this.db.prepare('SELECT boot,revoked,approval_mode FROM devices WHERE id=?').get(device) as { boot: string | null; revoked: number; approval_mode?: string | null } | undefined;
         if (devCheck && !devCheck.revoked && devCheck.boot === boot) {
           const hasWork = this.db.prepare(`SELECT 1 FROM tasks WHERE device=? AND status IN ${outstandingSql} LIMIT 1`).get(device);
           if (!hasWork) {
             mem.seen = now;
             mem.dirty = true;
-            return { jobs: [], cancel: [], ack: [] };
+            return { jobs: [], cancel: [], ack: [], approvalMode: normalizeApprovalMode(devCheck.approval_mode) };
           }
         }
       }
@@ -853,8 +871,9 @@ export class Store {
           this.db.prepare('UPDATE tasks SET status=?,seq=?,changed=?,output=? WHERE id=?').run(u.status, u.seq, now, u.output ?? null, u.id);
         }
       }
+      const approvalMode = normalizeApprovalMode(dev.approval_mode);
       const active = this.db.prepare(`SELECT * FROM tasks WHERE device=? AND status IN ${liveSql} ORDER BY created`).all(device) as TaskRow[];
-      if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack };
+      if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack, approvalMode };
       const pending = this.db.prepare("SELECT * FROM tasks WHERE device=? AND status='queued' AND deadline>? ORDER BY created LIMIT ?")
         .all(device, now, Math.max(0, maxActive - active.length)) as TaskRow[];
       for (const t of pending) {
@@ -862,7 +881,7 @@ export class Store {
         this.audit('task_dispatched', { id: t.id, device }, t.user_id);
       }
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));
-      return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack };
+      return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack, approvalMode };
     });
   }
 

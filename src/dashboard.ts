@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { HttpError, json, readJson } from './http.js';
-import { capabilities, match, secret, terminal, uuid, type Capability } from './protocol.js';
+import { approvalModes, capabilities, match, secret, terminal, uuid, type ApprovalMode, type Capability } from './protocol.js';
 import type { RateLimiter } from './rate-limit.js';
 import type { Store, UserRecord } from './store.js';
 
@@ -22,7 +22,7 @@ type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: 
 type Session = { digest: string; csrf: string; user: UserRecord };
 type DeviceVerification = {
   preview(code: string): { deviceName: string; expiresAt: string } | undefined;
-  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean, userId?: string): { status: string; deviceName: string };
+  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean, userId?: string, approvalMode?: ApprovalMode): { status: string; deviceName: string };
 };
 
 export class Dashboard {
@@ -145,10 +145,15 @@ export class Dashboard {
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/invites') {
-        const input = z.strictObject({ name: deviceName, capabilities: z.array(z.enum(capabilities)).min(1).max(3) }).parse(await readJson(req, 4096));
+        const input = z.strictObject({
+          name: deviceName,
+          capabilities: z.array(z.enum(capabilities)).min(1).max(3),
+          approvalMode: z.enum(approvalModes).optional()
+        }).parse(await readJson(req, 4096));
         if (new Set(input.capabilities).size !== input.capabilities.length) throw new HttpError(400, 'Duplicate capability.');
-        const token = this.store.invite(input.name, input.capabilities, userId);
-        json(res, 201, { token, expiresAt: new Date(Date.now() + 600000).toISOString(), capabilities: input.capabilities });
+        const approvalMode = input.approvalMode ?? 'client';
+        const token = this.store.invite(input.name, input.capabilities, userId, approvalMode);
+        json(res, 201, { token, expiresAt: new Date(Date.now() + 600000).toISOString(), capabilities: input.capabilities, approvalMode });
         return true;
       }
       if (req.method === 'POST' && url.pathname === '/manage/api/device-preview') {
@@ -165,11 +170,12 @@ export class Dashboard {
           user_code: pairingCode,
           name: deviceName.optional(),
           capabilities: z.array(z.enum(capabilities)).min(1).max(3),
-          approve: z.boolean()
+          approve: z.boolean(),
+          approvalMode: z.enum(approvalModes).optional()
         }).parse(await readJson(req, 4096));
         if (new Set(input.capabilities).size !== input.capabilities.length) throw new HttpError(400, 'Duplicate capability.');
         let result;
-        try { result = this.deviceFlow.verify(input.user_code, input.name, input.capabilities, input.approve, userId); }
+        try { result = this.deviceFlow.verify(input.user_code, input.name, input.capabilities, input.approve, userId, input.approvalMode ?? 'client'); }
         catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Device pairing failed.'); }
         json(res, 200, result);
         return true;
@@ -184,7 +190,7 @@ export class Dashboard {
         json(res, 200, { ok: true, ...this.store.clearRevokedDevices(userId) });
         return true;
       }
-      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke|delete)$/.exec(url.pathname);
+      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke|delete|approval-mode)$/.exec(url.pathname);
       if (req.method === 'POST' && deviceAction) {
         const id = uuid.parse(deviceAction[1]);
         if (deviceAction[2] === 'revoke') {
@@ -193,6 +199,11 @@ export class Dashboard {
         } else if (deviceAction[2] === 'delete') {
           z.strictObject({}).parse(await readJson(req, 4096));
           if (!this.store.deleteRevokedDevice(id, userId)) throw new HttpError(404, 'Device is unknown or not revoked.');
+        } else if (deviceAction[2] === 'approval-mode') {
+          const input = z.strictObject({ approvalMode: z.enum(approvalModes) }).parse(await readJson(req, 4096));
+          if (!this.store.setDeviceApprovalMode(id, input.approvalMode, userId)) throw new HttpError(404, 'Device is unknown or revoked.');
+          json(res, 200, { ok: true, approvalMode: input.approvalMode });
+          return true;
         } else {
           const input = z.strictObject({ name: deviceName }).parse(await readJson(req, 4096));
           if (!this.store.renameDevice(id, input.name, userId)) throw new HttpError(404, 'Device is unknown or revoked.');

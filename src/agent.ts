@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { realpathSync } from 'node:fs';
+import { realpathSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readFile, writeFile, unlink, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
@@ -10,7 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, type AgentConfig } from './agent-config.js';
-import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, operations, projectVersion, secret, syncReply, terminal, uuid, work, type Update, type Work, type Catalog } from './protocol.js';
+import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, needsLocalApproval, operations, projectVersion, secret, syncReply, terminal, uuid, work, type ApprovalMode, type Update, type Work, type Catalog } from './protocol.js';
 import { programEnv } from './workspace.js';
 import { clientEvents } from './client-events.js';
 import { deviceLogin, deviceLogout, deviceReport, deviceStatus, agentLock, keepAwake, identity, identityFile, requireUnpaired, saveIdentity, withIdentityLock, revokeIdentity, type DeviceIdentity } from './client-commands.js';
@@ -61,7 +61,17 @@ async function approvals(cfg: AgentConfig) {
   }
 }
 
-async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
+function summarizeJob(job: Work): string {
+  if (job.op === 'dc_call') {
+    const toolName = String(job.args.tool ?? 'dc_call');
+    const rawArgs = JSON.stringify(job.args.arguments ?? {});
+    const shortArgs = rawArgs.length > 220 ? rawArgs.slice(0, 220) + '…' : rawArgs;
+    return `${toolName} ${shortArgs}`;
+  }
+  return `${job.op} ${JSON.stringify(job.args).slice(0, 220)}`;
+}
+
+async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, serviceMode = false) {
   if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') throw new Error('Unsupported platform.');
   if (auth.origin !== cfg.origin) throw new Error('The pairing is bound to another Gateway.');
   const events = clientEvents(cfg.stateDir);
@@ -74,6 +84,8 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
   let completed = 0;
   let wakeSync: AbortController | undefined;
   let executorRecovery: Promise<void> | undefined;
+  let promptChain: Promise<void> = Promise.resolve();
+  let approvalMode: ApprovalMode = 'client';
   type Active = { state: Update; abort: AbortController; finished?: Promise<void> };
   const jobs = new Map<string, Active>();
   let dcClient: Client | undefined;
@@ -129,6 +141,46 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
     }).finally(() => { executorRecovery = undefined; });
   }
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => shutdown.abort());
+  function enqueueForegroundApproval(
+    job: Work,
+    request: string,
+    pendingFile: string,
+    decisionFile: string,
+    jobSignal: AbortSignal
+  ): () => void {
+    if (serviceMode || !process.stdin.isTTY || !process.stdout.isTTY) return () => {};
+    const promptAbort = new AbortController();
+    const stop = () => promptAbort.abort();
+    jobSignal.addEventListener('abort', stop, { once: true });
+    shutdown.signal.addEventListener('abort', stop, { once: true });
+
+    promptChain = promptChain.then(async () => {
+      if (promptAbort.signal.aborted || !existsSync(pendingFile) || existsSync(decisionFile)) return;
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const onAbort = () => rl.close();
+      promptAbort.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        console.log(`\n[本机审批] 请求操作: ${summarizeJob(job)}`);
+        const answer = (await rl.question('批准此操作？输入 y 批准 / n 拒绝 [y/N]: ', { signal: promptAbort.signal })).trim().toLowerCase();
+        const decision = answer === 'y' || answer === 'yes' ? 'approve' : 'deny';
+        await writeFile(decisionFile, JSON.stringify({ decision, digest: hash(request) }), { flag: 'wx', mode: 0o600 }).catch(err => {
+          if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        });
+        console.log(decision === 'approve' ? '[本机审批] 已批准并提交执行。' : '[本机审批] 已拒绝此操作。');
+      } catch {
+        // Aborted by expiry, cancellation, shutdown, or external CLI decide
+      } finally {
+        promptAbort.signal.removeEventListener('abort', onAbort);
+        rl.close();
+      }
+    }).catch(() => {});
+
+    return () => {
+      stop();
+      jobSignal.removeEventListener('abort', stop);
+      shutdown.signal.removeEventListener('abort', stop);
+    };
+  }
   function start(job: Work, cancel: boolean) {
     if (jobs.has(job.id) || jobs.size >= maxActive) return;
     const active: Active = { state: { id: job.id, status: 'running', seq: 1 }, abort: new AbortController() };
@@ -146,12 +198,13 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
         effective = capability(job.op, job.args);
         if (!cfg.capabilities.includes(effective)) throw new Error('Operation denied by local Agent configuration.');
         const args = operations[job.op].parse(job.args);
-        if (effective !== 'read') {
+        if (needsLocalApproval(approvalMode, effective)) {
           const req = { job: { ...job, args }, nonce: randomUUID(), expires: Date.now() + approvalMs };
           const request = JSON.stringify(req);
           const pending = filename(cfg, job.id, 'pending'), decision = filename(cfg, job.id, 'decision');
           await writeFile(pending, request, { flag: 'wx', mode: 0o600 });
-          state('awaiting_approval', 'Confirm on the device with the Agent CLI. Approval expires after five minutes.');
+          state('awaiting_approval', 'Confirm on the device (press y/n in the Agent terminal or use the Agent CLI). Approval expires after five minutes.');
+          const cancelPrompt = enqueueForegroundApproval(job, request, pending, decision, signal);
           try {
             for (;;) {
               signal.throwIfAborted();
@@ -170,7 +223,10 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
               }
               await delay(250, undefined, { signal });
             }
-          } finally { await Promise.all([pending, decision].map(f => unlink(f).catch(() => {}))); }
+          } finally {
+            cancelPrompt();
+            await Promise.all([pending, decision].map(f => unlink(f).catch(() => {})));
+          }
         }
         signal.throwIfAborted();
         state('running');
@@ -220,6 +276,10 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean) {
     if (!response.ok) throw new Error(`Gateway sync HTTP ${response.status}`);
     const reply = syncReply.parse(await response.json());
     lastSync = Date.now();
+    if (reply.approvalMode && reply.approvalMode !== approvalMode) {
+      approvalMode = reply.approvalMode;
+      console.log(`[审批策略] 已同步为: ${approvalMode}`);
+    }
     if (catalogToSend && catalogToSend === dcCatalog) catalogSynced = true;
     if (disconnectTask && reply.ack.includes(disconnectTask)) shutdown.abort();
     for (const id of reply.ack) if (jobs.has(id) && terminal.some(s => s === jobs.get(id)!.state.status)) jobs.delete(id);
@@ -311,7 +371,7 @@ export async function runAgentCli(argv: string[]) {
         else throw new Error('No device identity. Run connect or pair first.');
       }
       const stopAwake = keepAwake(cfg.noSleep && !args.includes('--disable-no-sleep'));
-      try { await run(cfg, auth, args.includes('--debug')); }
+      try { await run(cfg, auth, args.includes('--debug'), args.includes('--service')); }
       catch (error) {
         if (!args.includes('--service') || !(error instanceof EnrollmentEnded)) throw error;
         console.error(error.message);

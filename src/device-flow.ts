@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { readJson, json, bearer } from './http.js';
-import { agentClientId, hash, match, secret, uuid, type Capability } from './protocol.js';
+import { agentClientId, hash, match, secret, uuid, type ApprovalMode, type Capability } from './protocol.js';
 import { ipDigest, type RateLimiter } from './rate-limit.js';
 import type { Store } from './store.js';
 
@@ -14,6 +14,7 @@ type Enrollment = {
   userId?: string;
   deviceId?: string; credentialDigest?: string;
   caps?: Capability[];
+  approvalMode?: ApprovalMode;
 };
 
 export class DeviceFlow {
@@ -50,7 +51,7 @@ export class DeviceFlow {
     if (enrollment.status === 'pending') return { deviceName: enrollment.name, expiresAt: new Date(row.expires).toISOString() };
   }
 
-  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean, userId?: string) {
+  verify(code: string, name: string | undefined, caps: Capability[], approve: boolean, userId?: string, approvalMode: ApprovalMode = 'client') {
     return this.store.tx(() => {
       const row = this.findUserCode(code);
       if (!row) throw new Error('Unknown or expired device code.');
@@ -59,9 +60,10 @@ export class DeviceFlow {
       enrollment.status = approve ? 'approved' : 'denied';
       enrollment.name = name ?? enrollment.name;
       enrollment.caps = caps;
+      enrollment.approvalMode = approvalMode;
       if (userId) enrollment.userId = userId;
       this.store.updateAuthDataByDigest(row.digest, enrollment as unknown as Record<string, unknown>);
-      this.store.audit(approve ? 'device_pairing_approved' : 'device_pairing_denied', { name: enrollment.name, caps }, userId);
+      this.store.audit(approve ? 'device_pairing_approved' : 'device_pairing_denied', { name: enrollment.name, caps, approvalMode }, userId);
       return { status: enrollment.status, deviceName: enrollment.name };
     });
   }
@@ -84,7 +86,7 @@ export class DeviceFlow {
         if (enrollment.credentialDigest !== hash(credential)) return { error: 'invalid_grant' };
         return { device_id: enrollment.deviceId!, name: enrollment.name };
       }
-      const created = this.store.createPairedDevice(enrollment.name, credential, enrollment.caps ?? ['read'], enrollment.userId);
+      const created = this.store.createPairedDevice(enrollment.name, credential, enrollment.caps ?? ['read'], enrollment.userId, enrollment.approvalMode ?? 'client');
       enrollment.status = 'issued';
       enrollment.deviceId = created.id;
       enrollment.credentialDigest = hash(credential);

@@ -483,6 +483,12 @@
           </label>
         </div>
       </fieldset>
+      <label for="pair-approval-mode">本机二次审批</label>
+      <select id="pair-approval-mode" name="approvalMode">
+        <option value="client" selected>信任客户端（免本机二次确认，推荐）</option>
+        <option value="exec-only">仅运行命令需本机终端 y/n 确认</option>
+        <option value="strict">写入与命令均需本机终端 y/n 确认</option>
+      </select>
       <div class="dialog-actions"><button type="button" data-close class="secondary">取消</button><button class="primary" type="submit">生成令牌</button></div>
     </form>
     <div id="pair-result" hidden>
@@ -548,6 +554,12 @@
             </label>
           </div>
         </fieldset>
+        <label for="verify-approval-mode">本机二次审批</label>
+        <select id="verify-approval-mode" name="approvalMode">
+          <option value="client" selected>信任客户端（免本机二次确认，推荐）</option>
+          <option value="exec-only">仅运行命令需本机终端 y/n 确认</option>
+          <option value="strict">写入与命令均需本机终端 y/n 确认</option>
+        </select>
         <p class="subtle">实际执行边界同时受设备本地配置限制。</p>
       </div>
       <p id="verify-error" class="error" role="alert"></p>

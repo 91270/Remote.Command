@@ -380,7 +380,7 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
       assert.equal(details.status, 200);
       assert.ok((await details.json()).deviceName);
       const verified = await post(origin + '/manage/api/device-verify', {
-        user_code: browserCode, capabilities: ['read', 'write', 'exec'], approve: true, name
+        user_code: browserCode, capabilities: ['read', 'write', 'exec'], approve: true, name, approvalMode: 'strict'
       }, headers);
       assert.equal(verified.status, 200);
       assert.equal((await post(origin + '/manage/api/device-preview', { user_code: browserCode }, headers)).status, 404);
