@@ -274,6 +274,17 @@ export class Store {
     return row ? mapUser(row) : null;
   }
 
+  userAuthMethods(userId: string): ('google' | 'password')[] {
+    const methods: ('google' | 'password')[] = [];
+    const identities = this.db.prepare('SELECT DISTINCT provider FROM user_identities WHERE user_id=?')
+      .all(userId) as { provider: string }[];
+    if (identities.some(row => row.provider === 'google')) methods.push('google');
+    const userRow = this.db.prepare('SELECT password_hash FROM users WHERE id=?')
+      .get(userId) as { password_hash: string | null } | undefined;
+    if (typeof userRow?.password_hash === 'string' && userRow.password_hash.length > 0) methods.push('password');
+    return methods;
+  }
+
   touchUserLogin(userId: string, profile?: { email?: string | null; displayName?: string | null; avatarUrl?: string | null }) {
     this.tx(() => {
       const now = Date.now();
@@ -523,6 +534,15 @@ export class Store {
       return Number(row.n);
     }
     return Number((this.db.prepare("SELECT value FROM counters WHERE name='calls'").get() as { value: number }).value);
+  }
+
+  monthlyCalls(userId?: string, now = Date.now()): number {
+    const d = new Date(now);
+    const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const row = userId
+      ? this.db.prepare('SELECT count(*) AS n FROM tasks WHERE user_id=? AND created>=?').get(userId, monthStart) as { n: number }
+      : this.db.prepare('SELECT count(*) AS n FROM tasks WHERE created>=?').get(monthStart) as { n: number };
+    return Number(row.n);
   }
 
   // --- Devices & Pairing ---

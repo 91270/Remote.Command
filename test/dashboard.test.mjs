@@ -55,8 +55,21 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     assert.match(html, /<title>Remote\.Command · 控制台<\/title>/);
     assert.match(html, /id="device-start-ps"/);
     assert.match(html, /id="device-start-sh"/);
+    assert.match(html, /id="prompt-library"/);
+    assert.match(html, /data-prompt-cat="inspect"/);
+    assert.match(html, /data-prompt-cat="files"/);
+    assert.match(html, /data-prompt-cat="debug"/);
+    assert.match(html, /data-prompt-cat="ops"/);
+    assert.match(html, /id="chatgpt-troubleshoot"/);
+    assert.match(html, /id="chatgpt-custom-instructions"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
-    assert.equal((await request('/assets/dashboard.js')).status, 200);
+    const dashboardJsRes = await request('/assets/dashboard.js');
+    assert.equal(dashboardJsRes.status, 200);
+    const dashboardJs = await dashboardJsRes.text();
+    for (const key of ['renderPromptLibrary', 'inspect', 'files', 'debug', 'ops']) {
+      assert.equal(dashboardJs.includes(key), true, `dashboard.js missing ${key}`);
+    }
+    assert.equal(dashboardJs.includes('innerHTML'), false);
     assert.equal((await request('/api/overview')).status, 401);
     assert.equal((await request('/api/devices/revoke-all', {})).status, 401);
     assert.equal((await request('/api/login', { username: 'admin', password: 'wrong123' })).status, 403);

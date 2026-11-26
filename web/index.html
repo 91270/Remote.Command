@@ -186,6 +186,36 @@
             </div>
           </div>
         </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>安全 Prompt 模板库</h2>
+              <p>默认遵循“先只读、先给方案、再本地确认”的安全习惯，一键复制即可发给 ChatGPT。</p>
+            </div>
+            <div class="segmented" role="tablist" aria-label="Prompt 场景分类">
+              <button type="button" class="seg-btn prompt-cat active" role="tab" aria-selected="true" data-prompt-cat="inspect">只读巡检</button>
+              <button type="button" class="seg-btn prompt-cat" role="tab" aria-selected="false" data-prompt-cat="files">文件整理</button>
+              <button type="button" class="seg-btn prompt-cat" role="tab" aria-selected="false" data-prompt-cat="debug">代码排错</button>
+              <button type="button" class="seg-btn prompt-cat" role="tab" aria-selected="false" data-prompt-cat="ops">状态检查</button>
+            </div>
+          </div>
+          <div id="prompt-library" class="prompt-grid" aria-live="polite"></div>
+
+          <details id="chatgpt-troubleshoot" class="accordion-box">
+            <summary>ChatGPT 不调用工具或让我手动执行命令怎么办？</summary>
+            <ol class="steps">
+              <li>在首句直接点名连接器，例如：「<strong>使用 Remote.Command 工具</strong>，先检查我当前在线的设备」。</li>
+              <li>新建一个对话，并确认输入框下方或工具栏已勾选启用 <strong>Remote.Command</strong> Connector。</li>
+              <li>先发送「调用 <code>who_am_i</code> 和 <code>list_devices</code> 检查我的在线设备与权限」确认目标设备在线且已选中。</li>
+              <li>在 ChatGPT「设置 → 个性化 → 自定义指令（Custom Instructions）」粘贴下方推荐指令：</li>
+            </ol>
+            <div class="prompt-chip">
+              <span id="chatgpt-custom-instructions">当涉及读取本机文件、项目代码、日志排查或工作区任务时，优先调用已连接的 Remote.Command 工具：先调用 list_devices / who_am_i 确认在线设备，多设备时先 select_device；默认先只读检查并给出简短方案，再执行写入或命令；遇到 awaiting_approval 时提醒我在本机确认并用 get_tool_result 查询结果，不要重复提交。</span>
+              <button type="button" class="text-button copy-prompt" data-source="chatgpt-custom-instructions">复制指令</button>
+            </div>
+          </details>
+        </div>
       </section>
 
       <!-- Panel 2: Usage -->

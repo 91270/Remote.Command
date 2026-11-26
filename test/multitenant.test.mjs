@@ -57,6 +57,7 @@ test('legacy v0.5.3 SQLite database migrates losslessly to schema_version=1 owne
       assert.ok(devices[0].userId, 'Legacy device must be assigned to initial admin');
       const admin = store.findUserById(devices[0].userId);
       assert.equal(admin.role, 'admin');
+      assert.deepEqual(store.userAuthMethods(admin.id), ['password']);
       assert.equal(store.task(taskId, admin.id)?.output, 'ok');
       // Legacy auth tokens without userId must be purged
       assert.equal(store.db.prepare("SELECT count(*) AS n FROM auth WHERE kind='access'").get().n, 0);
@@ -118,6 +119,14 @@ test('multi-tenant isolation enforces strict boundaries between users across Sto
     const taskB = store.submit(devB.id, 'dc_call', { tool: 'read_file', arguments: { path: 'b.txt' } }, resB.user.id);
 
     // Store-level isolation checks
+    assert.deepEqual(store.userAuthMethods(resA.user.id), ['google']);
+    assert.deepEqual(store.userAuthMethods(resB.user.id), ['google']);
+    assert.equal(store.monthlyCalls(resA.user.id), 1);
+    assert.equal(store.monthlyCalls(resB.user.id), 1);
+    const nowDate = new Date();
+    const nextMonthNow = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() + 1, 2);
+    assert.equal(store.monthlyCalls(resA.user.id, nextMonthNow), 0);
+    assert.equal(store.monthlyCalls(resB.user.id, nextMonthNow), 0);
     assert.deepEqual(store.devices(resA.user.id).map(d => d.id), [devA.id]);
     assert.deepEqual(store.devices(resB.user.id).map(d => d.id), [devB.id]);
     assert.throws(() => store.submit(devA.id, 'dc_call', { tool: 'read_file', arguments: {} }, resB.user.id), /Unknown or revoked device/);

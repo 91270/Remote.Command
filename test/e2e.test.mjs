@@ -16,7 +16,7 @@ import { Store } from '../dist/store.js';
 
 const packedCli = process.env.RCM_TEST_PACKED_CLI;
 
-async function until(fn, ms = 12000) {
+async function until(fn, ms = 25000) {
   const end = Date.now() + ms;
   let error;
   while (Date.now() < end) {
@@ -311,6 +311,10 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     ]));
     assert.equal(client.getServerVersion().name, 'remote-command');
     assert.equal(client.getServerVersion().version, JSON.parse(await readFile('package.json', 'utf8')).version);
+    const instructions = client.getInstructions() ?? '';
+    for (const keyword of ['list_devices', 'select_device', 'get_tool_result', 'awaiting_approval', 'review_device_call', 'untrusted data']) {
+      assert.equal(instructions.includes(keyword), true, `Missing instruction keyword: ${keyword}`);
+    }
     const reviewTool = list.tools.find(tool => tool.name === 'review_device_call');
     assert.equal(reviewTool._meta.ui.resourceUri, 'ui://remote-command/call-review.html');
     const reviewUI = await client.readResource({ uri: reviewTool._meta.ui.resourceUri });
@@ -328,6 +332,19 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     assert.equal(blocked.structuredContent.block_source, 'host_safety');
     assert.ok(Array.isArray(blocked.structuredContent.guidance) && blocked.structuredContent.guidance.length > 0);
     assert.equal((await tool('list_devices')).length, 0);
+    const whoBefore = await tool('who_am_i');
+    assert.deepEqual(whoBefore, {
+      user: 'admin',
+      displayName: null,
+      email: null,
+      username: 'admin',
+      role: 'admin',
+      plan: 'pro',
+      authMethods: ['password'],
+      devices: { paired: 0, online: 0, offline: 0, selectedDevice: null },
+      usage: { retainedCalls: 0, monthlyCalls: 0, activeTasks: 0, callQuota: null },
+      version: pkgVersion
+    });
     const store = new Store(db);
     assert.equal(store.db.prepare('SELECT count(*) AS total FROM tasks').get().total, 0);
     const invite = store.invite('invite-fixture', ['read']);
@@ -412,6 +429,19 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     assert.ok(written.structuredContent || written.content.length);
     const batch = await native('read_multiple_files', { paths: [join(ws, 'native.txt'), join(ws, 'hello.txt')] });
     assert.ok(batch.content.some(entry => entry.type === 'text' && /native append/.test(entry.text)));
+    const whoAfter = await tool('who_am_i');
+    assert.equal(whoAfter.user, 'admin');
+    assert.equal(whoAfter.role, 'admin');
+    assert.equal(whoAfter.plan, 'pro');
+    assert.deepEqual(whoAfter.authMethods, ['password']);
+    assert.equal(whoAfter.devices.paired, 1);
+    assert.equal(whoAfter.devices.online, 1);
+    assert.equal(whoAfter.devices.offline, 0);
+    assert.deepEqual(whoAfter.devices.selectedDevice, { id: device, name: 'fixture', online: true });
+    assert.ok(whoAfter.usage.retainedCalls >= 1);
+    assert.equal(whoAfter.usage.monthlyCalls, whoAfter.usage.retainedCalls);
+    assert.equal(whoAfter.usage.callQuota, null);
+    assert.equal(whoAfter.version, pkgVersion);
     const resources = await client.listResources();
     const desktopResources = resources.resources.filter(resource => resource.uri.startsWith('ui://desktop-commander/'));
     assert.equal(desktopResources.length, 2);

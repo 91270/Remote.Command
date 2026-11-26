@@ -26,6 +26,71 @@ let auditRecords = [];
 let oauthClients = [];
 let activePanel = 'devices';
 let activeActivity = 'tasks';
+let activePromptCat = 'inspect';
+const promptTemplates = {
+  inspect: [
+    {
+      title: '检查在线设备与权限',
+      safety: '只读',
+      readOnly: true,
+      prompt: '请调用 Remote.Command 的 who_am_i 和 list_devices，列出当前账号、在线设备及可用权限，不要修改任何文件或执行命令。'
+    },
+    {
+      title: '扫描工作区并总结结构',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 先选定我的在线设备，再读取工作区目录结构并总结项目技术栈与核心文件，保持只读不作任何修改。'
+    },
+    {
+      title: '全文检索关键词或 TODO',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 的搜索工具在工作区中查找所有 "TODO" 或 "FIXME"，按文件和行号汇总成清单，不要改动代码。'
+    }
+  ],
+  files: [
+    {
+      title: '排查大文件与清理清单',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 检查工作区目录大小与占用较高的临时或冗余文件，先整理可清理清单和风险说明等我确认，未确认前不要删除或移动文件。'
+    },
+    {
+      title: '梳理文件命名与目录规范',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 只读浏览工作区文件名与目录层级，先输出结构重命名对照表与迁移方案供我审核，不要直接写文件。'
+    }
+  ],
+  debug: [
+    {
+      title: '日志与源码联动排错',
+      safety: '先出方案',
+      readOnly: false,
+      prompt: '使用 Remote.Command 读取工作区最近的报错日志与相关源码文件，定位根因后先向我解释问题并给出最小修复方案，先不要修改文件。'
+    },
+    {
+      title: '比对两份配置文件差异',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 读取两份配置文件并逐项对比差异与潜在风险，只输出对比分析报告，不要写入任何配置。'
+    }
+  ],
+  ops: [
+    {
+      title: '检查磁盘、内存与进程状态',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 只读查看目标设备的磁盘剩余空间、内存占用与当前运行进程概况，汇总潜在异常，不要执行重启或终止操作。'
+    },
+    {
+      title: '排查最近日志尾部报错',
+      safety: '只读',
+      readOnly: true,
+      prompt: '使用 Remote.Command 读取工作区日志目录中最新日志文件末尾 100 行，归纳错误或告警原因，保持只读，不要更改服务配置。'
+    }
+  ]
+};
 let currentTask = '';
 let refreshing = false;
 let verifiedCode = '';
@@ -203,6 +268,7 @@ async function showApp(session) {
   byId('overview-mcp-url').textContent = mcpUrl;
 
   applyTheme(getTheme());
+  renderPromptLibrary();
   await refresh();
 
   const query = new URLSearchParams(location.search);
@@ -690,6 +756,27 @@ async function refreshOAuthClients() {
   renderOAuthClients();
 }
 
+function renderPromptLibrary() {
+  const container = byId('prompt-library');
+  if (!container) return;
+  container.replaceChildren();
+
+  const items = promptTemplates[activePromptCat] || [];
+  for (const item of items) {
+    const card = node('article', 'prompt-card');
+    const head = node('div', 'prompt-card-head');
+    head.append(
+      node('strong', '', item.title),
+      node('span', 'pill' + (item.readOnly ? ' online' : ''), item.safety)
+    );
+    const text = node('p', 'prompt-card-text', item.prompt);
+    const foot = node('div', 'prompt-card-foot');
+    foot.appendChild(button('复制', 'secondary', () => copyText(item.prompt, `已复制「${item.title}」Prompt。`)));
+    card.append(head, text, foot);
+    container.appendChild(card);
+  }
+}
+
 // --- Main Refresh ---
 async function refresh() {
   if (!csrf || refreshing) return;
@@ -772,7 +859,22 @@ document.querySelectorAll('.client-toggle').forEach(btn => {
 });
 
 document.querySelectorAll('.copy-prompt').forEach(btn => {
-  btn.addEventListener('click', () => act(() => copyElement(btn.dataset.source, '已复制 Prompt 示例。')));
+  btn.addEventListener('click', () => act(() => copyElement(
+    btn.dataset.source,
+    btn.dataset.source === 'chatgpt-custom-instructions' ? '已复制推荐自定义指令。' : '已复制 Prompt 示例。'
+  )));
+});
+
+document.querySelectorAll('.prompt-cat').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activePromptCat = btn.dataset.promptCat || 'inspect';
+    document.querySelectorAll('.prompt-cat').forEach(tab => {
+      const selected = tab === btn;
+      tab.classList.toggle('active', selected);
+      tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    renderPromptLibrary();
+  });
 });
 
 document.querySelectorAll('.os-tab').forEach(btn => {
@@ -866,6 +968,8 @@ byId('device-status').addEventListener('change', renderDevices);
 byId('audit-search').addEventListener('input', renderAudit);
 byId('refresh-now').addEventListener('click', () => act(refresh));
 document.querySelectorAll('[data-close]').forEach(close => close.addEventListener('click', () => close.closest('dialog').close()));
+
+renderPromptLibrary();
 
 act(async () => {
   try { await showApp(await api('session')); }
