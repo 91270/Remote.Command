@@ -3,6 +3,7 @@
   --surface: #ffffff;
   --surface-subtle: #f2f2f7;
   --surface-glass: rgba(255, 255, 255, 0.8);
+  --seg-active: #ffffff;
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.14);
   --text: #1d1d1f;
@@ -33,6 +34,7 @@
     --surface: #161619;
     --surface-subtle: #1e1e22;
     --surface-glass: rgba(22, 22, 25, 0.82);
+    --seg-active: #2c2c30;
     --border: rgba(255, 255, 255, 0.09);
     --border-strong: rgba(255, 255, 255, 0.16);
     --text: #f5f5f7;
@@ -62,6 +64,7 @@
   --surface: #161619;
   --surface-subtle: #1e1e22;
   --surface-glass: rgba(22, 22, 25, 0.82);
+  --seg-active: #2c2c30;
   --border: rgba(255, 255, 255, 0.09);
   --border-strong: rgba(255, 255, 255, 0.16);
   --text: #f5f5f7;
@@ -110,6 +113,8 @@ button, .button-link {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
   text-decoration: none;
   transition: background 180ms var(--ease), border-color 180ms var(--ease), color 180ms var(--ease), transform 180ms var(--ease);
 }
@@ -416,6 +421,7 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 14px;
   margin-bottom: 16px;
 }
@@ -579,6 +585,8 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
 /* --- Segmented Control --- */
 .segmented {
   display: inline-flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
   padding: 3px;
   border-radius: 11px;
   background: var(--surface-subtle);
@@ -594,7 +602,7 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   color: var(--text-secondary);
 }
 .seg-btn.active {
-  background: var(--surface);
+  background: var(--seg-active);
   color: var(--text);
   box-shadow: var(--shadow-sm);
 }
