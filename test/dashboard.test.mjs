@@ -11,13 +11,18 @@ import { OAuth } from '../dist/oauth.js';
 import { Store } from '../dist/store.js';
 import { secret, hash } from '../dist/protocol.js';
 
-test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, revocation and logout', async () => {
+test('management dashboard Google session auth, CSRF, pairing, rename, tasks, audit, revocation and logout', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'rcm-dashboard-'));
   const store = new Store(join(temp, 'gateway.sqlite'));
-  const admin = store.ensureInitialAdmin();
-  assert.ok(admin);
-  assert.equal(admin.username, 'admin');
-  assert.equal(admin.password.length, 8);
+  const created = store.createGoogleUser({
+    sub: 'sub-dashboard-admin',
+    email: 'admin@example.com',
+    displayName: 'Admin',
+    avatarUrl: null,
+    adminEmails: new Set()
+  });
+  assert.equal(created.status, 'ok');
+  const admin = created.user;
   let dashboard;
   const server = createServer(async (req, res) => {
     try {
@@ -53,6 +58,9 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /<title>Remote\.Command · 控制台<\/title>/);
+    assert.match(html, /id="google-login-btn"/);
+    assert.doesNotMatch(html, /type="password"/);
+    assert.doesNotMatch(html, /password-login-fields/);
     assert.match(html, /id="device-start-ps"/);
     assert.match(html, /id="device-start-sh"/);
     assert.match(html, /id="prompt-library"/);
@@ -70,20 +78,28 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
       assert.equal(dashboardJs.includes(key), true, `dashboard.js missing ${key}`);
     }
     assert.equal(dashboardJs.includes('innerHTML'), false);
+    assert.equal(dashboardJs.includes('/manage/api/login'), false);
+    const authConfig = await (await request('/api/auth-config')).json();
+    assert.deepEqual(authConfig, {
+      googleEnabled: true,
+      registrationMode: 'invite_only',
+      initialized: true
+    });
     assert.equal((await request('/api/overview')).status, 401);
     assert.equal((await request('/api/devices/revoke-all', {})).status, 401);
-    assert.equal((await request('/api/login', { username: 'admin', password: 'wrong123' })).status, 403);
-    assert.equal((await request('/api/login', { username: 'admin', password: admin.password }, { Origin: 'https://elsewhere.example' })).status, 403);
-    const login = await request('/api/login', { username: 'admin', password: admin.password });
-    assert.equal(login.status, 200);
-    const rawCookie = login.headers.get('set-cookie');
-    assert.match(rawCookie, /^rcm_dashboard=/);
-    assert.match(rawCookie, /HttpOnly; SameSite=Strict/);
-    cookie = rawCookie.split(';')[0];
-    csrf = (await login.json()).csrf;
-    assert.equal(csrf.length, 43);
+    assert.equal((await request('/api/login', { username: 'admin', password: 'wrong123' })).status, 401);
+    const sessionToken = secret();
+    csrf = secret();
+    store.putAuth(sessionToken, 'dashboard', 3600000, {
+      csrf,
+      userId: admin.id,
+      username: admin.email,
+      role: admin.role
+    });
+    cookie = `rcm_dashboard=${sessionToken}`;
     assert.equal(store.db.prepare("SELECT kind FROM auth").get().kind, 'dashboard');
-    assert.equal(store.db.prepare('SELECT digest FROM auth').get().digest, hash(cookie.split('=')[1]));
+    assert.equal(store.db.prepare('SELECT digest FROM auth').get().digest, hash(sessionToken));
+    assert.equal((await request('/api/login', { username: 'admin', password: 'wrong123' })).status, 404);
     const overview = await (await request('/api/overview')).json();
     assert.equal(overview.devices.length, 0);
     assert.equal(overview.totalCalls, 0);
@@ -150,7 +166,7 @@ test('management dashboard owner login, CSRF, pairing, rename, tasks, audit, rev
     const audit = await (await request('/api/audit')).json();
     const serialized = JSON.stringify(audit);
     assert.match(serialized, /devices_revoked_all/);
-    for (const sensitive of [admin.password, token, credential, csrf]) assert.equal(serialized.includes(sensitive), false);
+    for (const sensitive of [token, credential, csrf]) assert.equal(serialized.includes(sensitive), false);
     assert.equal((await request('/api/logout', {})).status, 200);
     assert.equal((await request('/api/session')).status, 401);
   } finally {

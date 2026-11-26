@@ -257,10 +257,26 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     await writeFile(config, JSON.stringify({ gateway: agentOrigin, workspace: ws, stateDir, allowInsecureLoopback: !proxy,
       capabilities: ['read', 'write', 'exec'] }));
     const seedStore = new Store(db);
-    const adminPassword = seedStore.ensureInitialAdmin().password;
+    const createdOwner = seedStore.createGoogleUser({
+      sub: 'e2e-owner-sub',
+      email: 'owner@example.com',
+      displayName: 'Owner',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(createdOwner.status, 'ok');
+    const dashToken = secret();
+    const dashCsrf = secret();
+    seedStore.putAuth(dashToken, 'dashboard', 3600000, {
+      csrf: dashCsrf,
+      userId: createdOwner.user.id,
+      username: createdOwner.user.email,
+      role: createdOwner.user.role
+    });
     seedStore.db.close();
+    const dashCookieName = origin.startsWith('https:') ? '__Host-rcm_dashboard' : 'rcm_dashboard';
+    const dashCookie = `${dashCookieName}=${dashToken}`;
     await startGateway();
-    assert.ok(adminPassword);
     assert.equal((await fetch(resource)).status, 401);
     assert.equal((await fetch(resource, { headers: { Origin: 'https://invalid.example' } })).status, 403);
     const meta = await (await fetch(origin + '/.well-known/oauth-protected-resource/mcp')).json();
@@ -271,19 +287,24 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     const authParams = { client_id: clientId, redirect_uri: redirect, response_type: 'code', code_challenge: hash(verifier),
       code_challenge_method: 'S256', state: 'client-state', resource, scope: 'remote:use' };
     assert.equal((await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams({ ...authParams, redirect_uri: 'https://invalid.example' }))).status, 400);
-    const authorizationPage = await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams(authParams));
+    const unauthPage = await (await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams(authParams))).text();
+    assert.match(unauthPage, /\/auth\/google\/start/);
+    assert.doesNotMatch(unauthPage, /type="password"/);
+    const authorizationPage = await fetch(issuer.authorization_endpoint + '?' + new URLSearchParams(authParams), {
+      headers: { Cookie: dashCookie }
+    });
     assert.equal(authorizationPage.status, 200);
     assert.equal(authorizationPage.headers.get('referrer-policy'), 'strict-origin',
       'The consent page must preserve the Origin header on same-origin browser form submissions.');
     const page = await authorizationPage.text();
     const base = { ...authParams, until: /name="until" value="([^"]+)"/.exec(page)[1], proof: /name="proof" value="([^"]+)"/.exec(page)[1] };
-    const opaqueOrigin = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: adminPassword }, { Origin: 'null' });
+    const opaqueOrigin = await form(origin, '/oauth/authorize', { ...base, session_auth: '1' }, { Origin: 'null', Cookie: dashCookie });
     assert.equal(opaqueOrigin.status, 403);
     assert.deepEqual(await opaqueOrigin.json(), { error: 'Origin not allowed.' });
-    const wrongOwnerKey = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: 'wrongpwd' }, { Origin: origin });
-    assert.equal(wrongOwnerKey.status, 403);
-    assert.deepEqual(await wrongOwnerKey.json(), { error: 'access_denied' });
-    const authorized = await form(origin, '/oauth/authorize', { ...base, username: 'admin', password: adminPassword }, { Origin: origin });
+    const unauthSubmit = await form(origin, '/oauth/authorize', { ...base, session_auth: '1' }, { Origin: origin });
+    assert.equal(unauthSubmit.status, 403);
+    assert.deepEqual(await unauthSubmit.json(), { error: 'access_denied' });
+    const authorized = await form(origin, '/oauth/authorize', { ...base, session_auth: '1' }, { Origin: origin, Cookie: dashCookie });
     assert.equal(authorized.status, 303);
     assert.equal(authorized.headers.get('referrer-policy'), 'no-referrer');
     const callback = new URL(authorized.headers.get('location'));
@@ -334,13 +355,13 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     assert.equal((await tool('list_devices')).length, 0);
     const whoBefore = await tool('who_am_i');
     assert.deepEqual(whoBefore, {
-      user: 'admin',
-      displayName: null,
-      email: null,
-      username: 'admin',
+      user: 'owner@example.com',
+      displayName: 'Owner',
+      email: 'owner@example.com',
+      username: null,
       role: 'admin',
       plan: 'pro',
-      authMethods: ['password'],
+      authMethods: ['google'],
       devices: { paired: 0, online: 0, offline: 0, selectedDevice: null },
       usage: { retainedCalls: 0, monthlyCalls: 0, activeTasks: 0, callQuota: null },
       version: pkgVersion
@@ -350,12 +371,7 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     const invite = store.invite('invite-fixture', ['read']);
     store.db.close();
     const idFile = join(stateDir, 'identity.json');
-    const dashboardAuth = async () => {
-      const response = await post(origin + '/manage/api/login', { username: 'admin', password: adminPassword }, { Origin: origin });
-      const ownerSession = await response.json();
-      const cookie = response.headers.get('set-cookie').split(';')[0];
-      return { Origin: origin, Cookie: cookie, 'X-CSRF-Token': ownerSession.csrf };
-    };
+    const dashboardAuth = async () => ({ Origin: origin, Cookie: dashCookie, 'X-CSRF-Token': dashCsrf });
     const authorizeDevice = async (login, name) => {
       const browserCode = await until(() => /user_code=([A-F0-9]+)/.exec(login.output())?.[1] || login.exitCode !== null && 'failed');
       assert.notEqual(browserCode, 'failed', login.output());
@@ -430,10 +446,12 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     const batch = await native('read_multiple_files', { paths: [join(ws, 'native.txt'), join(ws, 'hello.txt')] });
     assert.ok(batch.content.some(entry => entry.type === 'text' && /native append/.test(entry.text)));
     const whoAfter = await tool('who_am_i');
-    assert.equal(whoAfter.user, 'admin');
+    assert.equal(whoAfter.user, 'owner@example.com');
+    assert.equal(whoAfter.displayName, 'Owner');
+    assert.equal(whoAfter.email, 'owner@example.com');
     assert.equal(whoAfter.role, 'admin');
     assert.equal(whoAfter.plan, 'pro');
-    assert.deepEqual(whoAfter.authMethods, ['password']);
+    assert.deepEqual(whoAfter.authMethods, ['google']);
     assert.equal(whoAfter.devices.paired, 1);
     assert.equal(whoAfter.devices.online, 1);
     assert.equal(whoAfter.devices.offline, 0);

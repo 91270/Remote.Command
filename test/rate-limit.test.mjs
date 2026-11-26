@@ -77,61 +77,9 @@ test('clientIp ignores spoofed proxy headers unless TRUST_PROXY=1 behind a priva
   );
 });
 
-test('Dashboard login enforces brute-force backoff (429 + Retry-After), resets on success, and audits without password', async () => {
-  const temp = await mkdtemp(join(tmpdir(), 'rcm-rl-login-'));
-  const store = new Store(join(temp, 'gateway.sqlite'));
-  const admin = store.ensureInitialAdmin();
-  assert.ok(admin);
-  const limiter = new RateLimiter({ rules: { login_failure: { max: 2, windowMs: 60_000 } } });
-  let dashboard;
-  const server = createServer(async (req, res) => {
-    try {
-      if (!await dashboard.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
-    } catch { res.writeHead(500).end(); }
-  });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const origin = 'http://127.0.0.1:' + server.address().port;
-  dashboard = new Dashboard(store, { origin, rateLimiter: limiter });
-
-  const postLogin = (username, password) => fetch(origin + '/manage/api/login', {
-    method: 'POST',
-    headers: { Origin: origin, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
-  });
-
-  try {
-    // 1 failure followed by 1 valid login resets the failure counter
-    assert.equal((await postLogin('admin', 'wrongpass1')).status, 403);
-    assert.equal((await postLogin('admin', admin.password)).status, 200);
-
-    // Now 2 consecutive failures trigger 429 on the 3rd attempt even with the right password
-    assert.equal((await postLogin('admin', 'wrongpass2')).status, 403);
-    assert.equal((await postLogin('admin', 'wrongpass3')).status, 403);
-    const blocked = await postLogin('admin', admin.password);
-    assert.equal(blocked.status, 429);
-    assert.ok(Number(blocked.headers.get('retry-after')) >= 1);
-
-    const audits = store.recentAudit(20);
-    const rlAudit = audits.find(a => a.event === 'rate_limited');
-    assert.ok(rlAudit);
-    assert.equal(rlAudit.details.bucket, 'login_failure');
-    assert.equal(rlAudit.details.route, '/manage/api/login');
-    const serialized = JSON.stringify(audits);
-    assert.equal(serialized.includes('wrongpass'), false);
-    assert.equal(serialized.includes(admin.password), false);
-  } finally {
-    await new Promise(resolve => server.close(resolve));
-    store.db.close();
-    await rm(temp, { recursive: true, force: true });
-  }
-});
-
 test('OAuth /oauth/register and /oauth/authorize enforce rate limits with CORS and Retry-After', async () => {
   const temp = await mkdtemp(join(tmpdir(), 'rcm-rl-oauth-'));
   const store = new Store(join(temp, 'gateway.sqlite'));
-  const admin = store.ensureInitialAdmin();
-  assert.ok(admin);
   const limiter = new RateLimiter({
     rules: {
       oauth_register: { max: 1, windowMs: 60_000 },
@@ -176,19 +124,44 @@ test('OAuth /oauth/register and /oauth/authorize enforce rate limits with CORS a
       scope: 'remote:use'
     });
     const html = await (await fetch(authUrl)).text();
-    const hidden = Object.fromEntries([...html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]+)">/g)].map(m => [m[1], m[2]]));
-    const postAuth = (password) => fetch(origin + '/oauth/authorize', {
+    assert.doesNotMatch(html, /type="password"/);
+    const formParams = new URLSearchParams({
+      client_id: client.client_id,
+      redirect_uri: 'https://chatgpt.com/connector_platform_oauth_redirect',
+      response_type: 'code',
+      code_challenge: hash(verifier),
+      code_challenge_method: 'S256',
+      state: 'st-rl',
+      resource: origin + '/mcp',
+      scope: 'remote:use',
+      until: String(Date.now() + 300000),
+      proof: oauth.sign(JSON.stringify([[
+        ['client_id', client.client_id],
+        ['redirect_uri', 'https://chatgpt.com/connector_platform_oauth_redirect'],
+        ['response_type', 'code'],
+        ['code_challenge', hash(verifier)],
+        ['code_challenge_method', 'S256'],
+        ['state', 'st-rl'],
+        ['resource', origin + '/mcp'],
+        ['scope', 'remote:use']
+      ], String(Date.now() + 300000)]))
+    });
+    const postAuth = () => fetch(origin + '/oauth/authorize', {
       method: 'POST',
       redirect: 'manual',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ ...hidden, username: 'admin', password })
+      body: new URLSearchParams({ ...Object.fromEntries(formParams), session_auth: '1' })
     });
 
-    assert.equal((await postAuth('bad1')).status, 403);
-    assert.equal((await postAuth('bad2')).status, 403);
-    const throttled = await postAuth(admin.password);
+    assert.equal((await postAuth()).status, 403);
+    assert.equal((await postAuth()).status, 403);
+    const throttled = await postAuth();
     assert.equal(throttled.status, 429);
     assert.ok(Number(throttled.headers.get('retry-after')) >= 1);
+
+    const rlAudit = store.recentAudit(20).find(a => a.event === 'rate_limited' && a.details.route === '/oauth/authorize');
+    assert.ok(rlAudit);
+    assert.equal(rlAudit.details.bucket, 'login_failure');
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();

@@ -168,7 +168,7 @@ jobs:
           docker compose logs gateway | grep -q 'Gateway awaiting first admin sign-in via Google OAuth'
           sudo sh -c 'ls -1 data/logs | grep -Eq "^[0-9]{8}-[0-9]{4}\.log$"'
           request --fail "$origin/manage/api/auth-config" \
-            | jq -e '.googleEnabled == true and .hasPasswordAdmin == false and .registrationMode == "invite_only" and .initialized == false'
+            | jq -e '.googleEnabled == true and .registrationMode == "invite_only" and .initialized == false'
           test "$(request -o /dev/null -w '%{http_code}' "$origin/manage/api/overview")" = 401
           request --fail "$origin/.well-known/oauth-protected-resource/mcp" \
             | jq -e --arg resource "$origin/mcp" '.resource == $resource'

@@ -1,8 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
-import { hash, randomPassword, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { randomUUID } from 'node:crypto';
+import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
@@ -57,22 +57,6 @@ export type AuthorizedOAuthClient = {
 };
 export type AuthRecord = { digest: string; kind: string; expires: number; data: Record<string, unknown> };
 
-function hashPassword(password: string): string {
-  const salt = randomBytes(16).toString('hex');
-  const derived = scryptSync(password, salt, 64).toString('hex');
-  return `scrypt$${salt}$${derived}`;
-}
-
-function verifyPassword(password: string, stored: string): boolean {
-  const parts = stored.split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  const [, salt, expectedHex] = parts;
-  if (!salt || !expectedHex) return false;
-  const expected = Buffer.from(expectedHex, 'hex');
-  const actual = scryptSync(password, salt, expected.length);
-  return timingSafeEqual(actual, expected);
-}
-
 function mapUser(row: Record<string, unknown>): UserRecord {
   return {
     id: String(row.id),
@@ -116,7 +100,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS auth_expiry ON auth(expires);
       CREATE TABLE IF NOT EXISTS device_catalog (device TEXT PRIMARY KEY, catalog TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE,
-        role TEXT NOT NULL DEFAULT 'user', password_hash TEXT, created_at INTEGER NOT NULL);
+        role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'active', display_name TEXT, avatar_url TEXT,
+        plan TEXT NOT NULL DEFAULT 'free', plan_expires_at INTEGER, custom_monthly_quota INTEGER,
+        created_at INTEGER NOT NULL, last_login_at INTEGER);
       CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, provider_sub TEXT NOT NULL,
         user_id TEXT NOT NULL, email TEXT, created_at INTEGER NOT NULL,
         PRIMARY KEY(provider, provider_sub), FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
@@ -179,23 +165,12 @@ export class Store {
       }
 
       if (currentVersion < SCHEMA_VERSION) {
-        const hasLegacyRows = Boolean(
-          this.db.prepare('SELECT 1 FROM devices WHERE user_id IS NULL LIMIT 1').get() ||
-          this.db.prepare('SELECT 1 FROM tasks WHERE user_id IS NULL LIMIT 1').get() ||
-          this.db.prepare('SELECT 1 FROM invites WHERE user_id IS NULL LIMIT 1').get()
-        );
         const existingAdmin = this.db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1").get() as { id: string } | undefined;
-        let ownerId = existingAdmin?.id;
-        if (!ownerId && hasLegacyRows) {
-          ownerId = randomUUID();
-          this.db.prepare("INSERT INTO users(id,username,email,role,status,plan,password_hash,created_at) VALUES(?,?,NULL,'admin','active','pro',?,?)")
-            .run(ownerId, 'admin', hashPassword(randomPassword(8)), Date.now());
-        }
-        if (ownerId) {
-          this.db.prepare('UPDATE devices SET user_id=? WHERE user_id IS NULL').run(ownerId);
-          this.db.prepare('UPDATE tasks SET user_id=? WHERE user_id IS NULL').run(ownerId);
-          this.db.prepare('UPDATE invites SET user_id=? WHERE user_id IS NULL').run(ownerId);
-          this.db.prepare('UPDATE audit SET user_id=? WHERE user_id IS NULL').run(ownerId);
+        if (existingAdmin?.id) {
+          this.db.prepare('UPDATE devices SET user_id=? WHERE user_id IS NULL').run(existingAdmin.id);
+          this.db.prepare('UPDATE tasks SET user_id=? WHERE user_id IS NULL').run(existingAdmin.id);
+          this.db.prepare('UPDATE invites SET user_id=? WHERE user_id IS NULL').run(existingAdmin.id);
+          this.db.prepare('UPDATE audit SET user_id=? WHERE user_id IS NULL').run(existingAdmin.id);
         }
         // Clear legacy auth sessions/tokens that have no userId bound
         this.db.exec("DELETE FROM auth WHERE kind IN ('dashboard','code','access','refresh') AND json_extract(data,'$.userId') IS NULL");
@@ -258,10 +233,6 @@ export class Store {
     return Number((this.db.prepare('SELECT count(*) AS n FROM users').get() as { n: number }).n);
   }
 
-  hasPasswordAdmin(): boolean {
-    return !!this.db.prepare("SELECT 1 FROM users WHERE role='admin' AND password_hash IS NOT NULL LIMIT 1").get();
-  }
-
   findUserById(id: string): UserRecord | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as Record<string, unknown> | undefined;
     return row ? mapUser(row) : null;
@@ -274,15 +245,10 @@ export class Store {
     return row ? mapUser(row) : null;
   }
 
-  userAuthMethods(userId: string): ('google' | 'password')[] {
-    const methods: ('google' | 'password')[] = [];
+  userAuthMethods(userId: string): 'google'[] {
     const identities = this.db.prepare('SELECT DISTINCT provider FROM user_identities WHERE user_id=?')
       .all(userId) as { provider: string }[];
-    if (identities.some(row => row.provider === 'google')) methods.push('google');
-    const userRow = this.db.prepare('SELECT password_hash FROM users WHERE id=?')
-      .get(userId) as { password_hash: string | null } | undefined;
-    if (typeof userRow?.password_hash === 'string' && userRow.password_hash.length > 0) methods.push('password');
-    return methods;
+    return identities.some(row => row.provider === 'google') ? ['google'] : [];
   }
 
   touchUserLogin(userId: string, profile?: { email?: string | null; displayName?: string | null; avatarUrl?: string | null }) {
@@ -291,27 +257,6 @@ export class Store {
       this.db.prepare('UPDATE users SET last_login_at=?, display_name=COALESCE(?,display_name), avatar_url=COALESCE(?,avatar_url) WHERE id=?')
         .run(now, profile?.displayName ?? null, profile?.avatarUrl ?? null, userId);
     });
-  }
-
-  ensureInitialAdmin(initialPassword?: string): { username: string; password: string; id: string } | null {
-    return this.tx(() => {
-      const existing = this.db.prepare("SELECT 1 FROM users WHERE role='admin' LIMIT 1").get();
-      if (existing) return null;
-      const password = initialPassword ?? randomPassword(8);
-      const id = randomUUID();
-      this.db.prepare("INSERT INTO users(id,username,email,role,status,plan,password_hash,created_at) VALUES(?,?,NULL,'admin','active','pro',?,?)")
-        .run(id, 'admin', hashPassword(password), Date.now());
-      this.audit('admin_initialized', { username: 'admin' }, id);
-      return { id, username: 'admin', password };
-    });
-  }
-
-  authenticateUser(username: string, password: string): UserRecord | null {
-    const row = this.db.prepare('SELECT * FROM users WHERE username=?').get(username) as Record<string, unknown> | undefined;
-    if (!row || typeof row.password_hash !== 'string') return null;
-    if (row.status === 'disabled') return null;
-    if (!verifyPassword(password, row.password_hash)) return null;
-    return mapUser(row);
   }
 
   createGoogleUser(input: {
@@ -367,7 +312,7 @@ export class Store {
       const userId = randomUUID();
       const now = Date.now();
       this.db.prepare(
-        'INSERT INTO users(id,username,email,role,status,display_name,avatar_url,plan,password_hash,created_at,last_login_at) VALUES(?,NULL,?,?,?,?,?,?,NULL,?,?)'
+        'INSERT INTO users(id,username,email,role,status,display_name,avatar_url,plan,created_at,last_login_at) VALUES(?,NULL,?,?,?,?,?,?,?,?)'
       ).run(userId, normalizedEmail, role, 'active', input.displayName, input.avatarUrl, plan, now, now);
       this.db.prepare(
         'INSERT INTO user_identities(provider,provider_sub,user_id,email,created_at) VALUES(?,?,?,?,?)'

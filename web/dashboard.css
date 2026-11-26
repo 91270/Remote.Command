@@ -158,7 +158,7 @@ button, .button-link {
 }
 .icon-button:hover { color: var(--text); }
 
-input[type="text"], input[type="password"], input[type="search"], select {
+input[type="text"], input[type="search"], select {
   width: 100%;
   padding: 10px 13px;
   border-radius: var(--radius-sm);

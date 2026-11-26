@@ -19,20 +19,13 @@
       </div>
     </div>
     <div class="login-main">
-      <form id="login-form" class="login-card">
+      <div id="login-card" class="login-card">
         <h2>登录控制台</h2>
         <p id="login-hint">使用 Google 账号安全登录或注册（全新部署的首个 Google 用户将成为管理员）。</p>
-        <a id="google-login-btn" class="primary button-link" href="/auth/google/start?return_to=%2Fmanage" hidden>使用 Google 账号继续</a>
-        <div id="password-login-fields">
-          <label for="login-username">账号</label>
-          <input id="login-username" name="username" type="text" value="admin" required autocomplete="username">
-          <label for="login-password">密码</label>
-          <input id="login-password" name="password" type="password" required autocomplete="current-password">
-          <button type="submit" class="primary">登录</button>
-        </div>
+        <a id="google-login-btn" class="primary button-link" href="/auth/google/start?return_to=%2Fmanage">使用 Google 账号继续</a>
         <p id="login-error" class="error" role="alert"></p>
         <p class="login-footer-link"><a href="/">← 返回官网首页</a></p>
-      </form>
+      </div>
     </div>
   </section>
 

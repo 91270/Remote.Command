@@ -223,13 +223,12 @@ function showLogin() {
   csrf = '';
   currentSession = null;
   byId('notice').hidden = true;
-  byId('login-username').value = 'admin';
-  byId('login-password').value = '';
+  byId('login-error').textContent = '';
   byId('app-view').hidden = true;
   byId('login-view').hidden = false;
   document.querySelectorAll('dialog[open]').forEach(d => d.close());
   const googleBtn = byId('google-login-btn');
-  const pwFields = byId('password-login-fields');
+  const loginHint = byId('login-hint');
   if (googleBtn) {
     const returnTo = location.pathname + (location.search || '');
     googleBtn.href = '/auth/google/start?return_to=' + encodeURIComponent(returnTo);
@@ -237,9 +236,16 @@ function showLogin() {
   fetch('/manage/api/auth-config', { credentials: 'same-origin' })
     .then(r => (r.ok ? r.json() : null))
     .then(cfg => {
-      if (!cfg) return;
-      if (googleBtn) googleBtn.hidden = !cfg.googleEnabled;
-      if (pwFields) pwFields.hidden = !!(cfg.googleEnabled && !cfg.hasPasswordAdmin);
+      if (!cfg || !loginHint) return;
+      if (!cfg.initialized) {
+        loginHint.textContent = '使用 Google 账号安全登录（全新部署的首个 Google 用户将自动成为管理员）。';
+      } else if (cfg.registrationMode === 'closed') {
+        loginHint.textContent = '使用已授权的 Google 账号登录（当前已关闭新用户注册）。';
+      } else if (cfg.registrationMode === 'invite_only') {
+        loginHint.textContent = '使用 Google 账号安全登录（新用户需携带管理员邀请码激活）。';
+      } else {
+        loginHint.textContent = '使用 Google 账号安全登录或自动注册。';
+      }
     })
     .catch(() => {});
 }
@@ -803,26 +809,6 @@ async function refresh() {
 }
 
 // --- Event Bindings ---
-byId('login-form').addEventListener('submit', event => {
-  event.preventDefault();
-  byId('login-error').textContent = '';
-  act(async () => {
-    const data = new FormData(event.target);
-    const res = await fetch('/manage/api/login', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: data.get('username'), password: data.get('password') })
-    });
-    const body = await res.json();
-    if (!res.ok) {
-      byId('login-error').textContent = body.error || '登录失败。';
-      return;
-    }
-    await showApp(await api('session'));
-  });
-});
-
 async function handleLogout() {
   await api('logout', {});
   showLogin();

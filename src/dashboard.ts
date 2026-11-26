@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { HttpError, json, readJson } from './http.js';
 import { capabilities, match, secret, terminal, uuid, type Capability } from './protocol.js';
-import { ipDigest, type RateLimiter } from './rate-limit.js';
+import type { RateLimiter } from './rate-limit.js';
 import type { Store, UserRecord } from './store.js';
 
 const sessionLifetime = 8 * 60 * 60 * 1000;
@@ -89,56 +89,10 @@ export class Dashboard {
 
       if (req.method === 'GET' && url.pathname === '/manage/api/auth-config') {
         json(res, 200, {
-          googleEnabled: !!this.config.googleEnabled,
-          hasPasswordAdmin: this.store.hasPasswordAdmin(),
+          googleEnabled: true,
           registrationMode: this.store.getRegistrationMode(),
           initialized: this.store.userCount() > 0
         });
-        return true;
-      }
-
-      if (req.method === 'POST' && url.pathname === '/manage/api/login') {
-        const input = z.strictObject({
-          username: z.string().trim().min(1).max(80),
-          password: z.string().min(1).max(256)
-        }).parse(await readJson(req, 4096));
-        const limiter = this.config.rateLimiter;
-        const ip = limiter ? limiter.clientIp(req) : '';
-        const userKey = limiter ? `${ip}:${input.username.toLowerCase()}` : '';
-        if (limiter) {
-          const ipStatus = limiter.check('login_failure', ip);
-          const userStatus = limiter.check('login_failure', userKey);
-          if (!ipStatus.allowed || !userStatus.allowed) {
-            const retryAfterSec = Math.max(ipStatus.retryAfterSec, userStatus.retryAfterSec);
-            if (limiter.shouldAudit('login_failure', ip)) {
-              this.store.audit('rate_limited', { bucket: 'login_failure', route: '/manage/api/login', ip: ipDigest(ip) });
-            }
-            json(res, 429, { error: 'Too many failed login attempts. Try again later.' }, { 'Retry-After': String(retryAfterSec) });
-            return true;
-          }
-        }
-        const user = this.store.authenticateUser(input.username, input.password);
-        if (!user || user.status !== 'active') {
-          if (limiter) {
-            limiter.consume('login_failure', ip);
-            limiter.consume('login_failure', userKey);
-          }
-          throw new HttpError(403, 'Username or password is incorrect.');
-        }
-        if (limiter) {
-          limiter.reset('login_failure', ip);
-          limiter.reset('login_failure', userKey);
-        }
-        const token = secret(), csrf = secret();
-        this.store.tx(() => {
-          const previous = this.session(req);
-          if (previous) this.store.deleteAuthByDigest(previous.digest);
-          this.store.putAuth(token, 'dashboard', sessionLifetime, {
-            csrf, userId: user.id, username: user.username ?? user.email, role: user.role
-          });
-          this.store.audit('dashboard_login', { username: user.username ?? user.email }, user.id);
-        });
-        json(res, 200, { csrf, username: user.username ?? user.email, role: user.role }, { 'Set-Cookie': this.cookie(token, sessionLifetime / 1000) });
         return true;
       }
 

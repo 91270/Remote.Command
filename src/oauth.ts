@@ -338,24 +338,10 @@ export class OAuth {
         <button type="submit" class="primary">确认授权</button>
       </form>`;
       } else {
-        const googleBlock = this.cfg.googleEnabled
-          ? `<a href="${escapeHtml(googleHref)}" class="primary button-link">使用 Google 账号继续</a>`
-          : '';
-        const passwordBlock = !this.cfg.googleEnabled || this.store.hasPasswordAdmin()
-          ? `<form method="post" action="/oauth/authorize">
-        ${inputs}
-        <label for="auth-username">管理员账号</label>
-        <input id="auth-username" name="username" type="text" value="admin" required autocomplete="username">
-        <label for="auth-password">密码</label>
-        <input id="auth-password" name="password" type="password" required autocomplete="current-password">
-        <button type="submit" class="${this.cfg.googleEnabled ? 'secondary' : 'primary'}">确认授权</button>
-      </form>`
-          : '';
         cardBody = `<div class="login-card">
         <h2>授权连接</h2>
         <p>客户端 <strong>${clientLabel}</strong> 请求访问权限，授权后将回调至 <code>${redirectOrigin}</code>。</p>
-        ${googleBlock}
-        ${passwordBlock}
+        <a href="${escapeHtml(googleHref)}" class="primary button-link">使用 Google 账号继续</a>
       </div>`;
       }
 
@@ -399,41 +385,24 @@ export class OAuth {
       return json(res, 403, { error: 'access_denied' });
     }
 
-    let authorizedUser: UserRecord | null = null;
-    if (p.get('session_auth') === '1') {
-      authorizedUser = activeUser;
-      if (!authorizedUser || authorizedUser.status !== 'active') {
-        return json(res, 403, { error: 'access_denied' });
-      }
-    } else {
-      const username = (p.get('username') ?? '').trim(), password = p.get('password') ?? '';
-      const limiter = this.cfg.rateLimiter;
-      const ip = limiter ? limiter.clientIp(req) : '';
-      const userKey = limiter ? `${ip}:${username.toLowerCase()}` : '';
-      if (limiter) {
-        const ipStatus = limiter.check('login_failure', ip);
-        const userStatus = limiter.check('login_failure', userKey);
-        if (!ipStatus.allowed || !userStatus.allowed) {
-          const retryAfterSec = Math.max(ipStatus.retryAfterSec, userStatus.retryAfterSec);
-          if (limiter.shouldAudit('login_failure', ip)) {
-            this.store.audit('rate_limited', { bucket: 'login_failure', route: '/oauth/authorize', ip: ipDigest(ip) });
-          }
-          return json(res, 429, { error: 'too_many_requests' }, { 'Retry-After': String(retryAfterSec) });
+    const limiter = this.cfg.rateLimiter;
+    const ip = limiter ? limiter.clientIp(req) : '';
+    if (limiter) {
+      const ipStatus = limiter.check('login_failure', ip);
+      if (!ipStatus.allowed) {
+        if (limiter.shouldAudit('login_failure', ip)) {
+          this.store.audit('rate_limited', { bucket: 'login_failure', route: '/oauth/authorize', ip: ipDigest(ip) });
         }
-      }
-      authorizedUser = this.store.authenticateUser(username, password);
-      if (!authorizedUser || authorizedUser.status !== 'active') {
-        if (limiter) {
-          limiter.consume('login_failure', ip);
-          limiter.consume('login_failure', userKey);
-        }
-        return json(res, 403, { error: 'access_denied' });
-      }
-      if (limiter) {
-        limiter.reset('login_failure', ip);
-        limiter.reset('login_failure', userKey);
+        return json(res, 429, { error: 'too_many_requests' }, { 'Retry-After': String(ipStatus.retryAfterSec) });
       }
     }
+
+    if (p.get('session_auth') !== '1' || !activeUser || activeUser.status !== 'active') {
+      if (limiter) limiter.consume('login_failure', ip);
+      return json(res, 403, { error: 'access_denied' });
+    }
+    if (limiter) limiter.reset('login_failure', ip);
+    const authorizedUser = activeUser;
 
     const redirect = new URL(redirectUri);
     const code = this.store.tx(() => {

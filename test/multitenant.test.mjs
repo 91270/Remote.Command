@@ -6,61 +6,31 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../dist/store.js';
 import { Dashboard } from '../dist/dashboard.js';
 import { DeviceFlow } from '../dist/device-flow.js';
 import { hash, secret } from '../dist/protocol.js';
 
-test('legacy v0.5.3 SQLite database migrates losslessly to schema_version=1 owned by initial admin', async () => {
-  const temp = await mkdtemp(join(tmpdir(), 'rcm-migrate-'));
+test('Store initializes schema_version=1 cleanly without password_hash and enforces Google identity auth methods', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-schema-'));
   const file = join(temp, 'gateway.sqlite');
   try {
-    // Construct a pre-multi-tenant v0.5.3 schema (user_version = 0, no user_id columns)
-    const legacy = new DatabaseSync(file);
-    legacy.exec(`
-      CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, credential TEXT UNIQUE NOT NULL,
-        caps TEXT NOT NULL, boot TEXT, seen INTEGER, last_seen INTEGER, platform TEXT, revoked INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE retired_boots (device TEXT NOT NULL, boot TEXT NOT NULL, PRIMARY KEY(device, boot));
-      CREATE TABLE invites (digest TEXT PRIMARY KEY, name TEXT NOT NULL, caps TEXT NOT NULL, expires INTEGER NOT NULL);
-      CREATE TABLE tasks (id TEXT PRIMARY KEY, device TEXT NOT NULL, op TEXT NOT NULL, args TEXT NOT NULL,
-        status TEXT NOT NULL, boot TEXT, created INTEGER NOT NULL, changed INTEGER NOT NULL, deadline INTEGER NOT NULL,
-        cancel INTEGER NOT NULL DEFAULT 0, output TEXT, seq INTEGER NOT NULL DEFAULT 0, mcp_result TEXT, tool_name TEXT, background INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE audit (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, event TEXT NOT NULL, details TEXT NOT NULL);
-      CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
-      CREATE TABLE auth (digest TEXT PRIMARY KEY, kind TEXT NOT NULL, expires INTEGER NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE device_catalog (device TEXT PRIMARY KEY, catalog TEXT NOT NULL);
-      CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE,
-        role TEXT NOT NULL DEFAULT 'user', password_hash TEXT, created_at INTEGER NOT NULL);
-      CREATE TABLE user_identities (provider TEXT NOT NULL, provider_sub TEXT NOT NULL,
-        user_id TEXT NOT NULL, email TEXT, created_at INTEGER NOT NULL, PRIMARY KEY(provider, provider_sub));
-      CREATE TABLE oauth_clients (client_id TEXT PRIMARY KEY, client_secret_hash TEXT NOT NULL,
-        client_name TEXT, redirect_uris TEXT NOT NULL, grant_types TEXT NOT NULL, response_types TEXT NOT NULL,
-        token_endpoint_auth_method TEXT NOT NULL, scope TEXT, created_at INTEGER NOT NULL);
-    `);
-    const devId = randomUUID();
-    const taskId = randomUUID();
-    const cred = secret();
-    const now = Date.now();
-    legacy.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?,?,?,0)').run(devId, 'legacy-mac', hash(cred), '["read"]', null, 0, now - 1000, 'darwin');
-    legacy.prepare('INSERT INTO tasks VALUES(?,?,?,?,?,?,?,?,?,0,?,1,NULL,?,0)').run(taskId, devId, 'dc_call', '{}', 'succeeded', null, now - 500, now - 400, now + 1000, 'ok', 'read_file');
-    legacy.prepare('INSERT INTO auth VALUES(?,?,?,?)').run(hash(secret()), 'access', now + 60000, '{}');
-    legacy.close();
-
     const store = new Store(file);
     try {
       const version = store.db.prepare('PRAGMA user_version').get().user_version;
       assert.equal(version, 1);
-      const devices = store.devices();
-      assert.equal(devices.length, 1);
-      assert.equal(devices[0].id, devId);
-      assert.ok(devices[0].userId, 'Legacy device must be assigned to initial admin');
-      const admin = store.findUserById(devices[0].userId);
-      assert.equal(admin.role, 'admin');
-      assert.deepEqual(store.userAuthMethods(admin.id), ['password']);
-      assert.equal(store.task(taskId, admin.id)?.output, 'ok');
-      // Legacy auth tokens without userId must be purged
-      assert.equal(store.db.prepare("SELECT count(*) AS n FROM auth WHERE kind='access'").get().n, 0);
+      const userCols = store.db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
+      assert.equal(userCols.includes('password_hash'), false);
+      const created = store.createGoogleUser({
+        sub: 'sub-schema-admin',
+        email: 'schema-admin@example.com',
+        displayName: 'Schema Admin',
+        avatarUrl: null,
+        adminEmails: new Set()
+      });
+      assert.equal(created.status, 'ok');
+      assert.equal(created.user.role, 'admin');
+      assert.deepEqual(store.userAuthMethods(created.user.id), ['google']);
     } finally {
       store.db.close();
     }
