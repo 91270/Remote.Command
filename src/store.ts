@@ -601,6 +601,39 @@ export class Store {
     });
   }
 
+  private purgeDeviceRecord(id: string) {
+    this.db.prepare('DELETE FROM retired_boots WHERE device=?').run(id);
+    this.db.prepare('DELETE FROM device_catalog WHERE device=?').run(id);
+    this.db.prepare('DELETE FROM devices WHERE id=? AND revoked=1').run(id);
+    this.liveSeen.delete(id);
+  }
+
+  deleteRevokedDevice(id: string, userId?: string): boolean {
+    return this.tx(() => {
+      const row = userId
+        ? this.db.prepare('SELECT user_id, name FROM devices WHERE id=? AND user_id=? AND revoked=1').get(id, userId) as { user_id: string | null; name: string } | undefined
+        : this.db.prepare('SELECT user_id, name FROM devices WHERE id=? AND revoked=1').get(id) as { user_id: string | null; name: string } | undefined;
+      if (!row) return false;
+      this.purgeDeviceRecord(id);
+      this.audit('device_deleted', { device: id, name: row.name }, row.user_id ?? userId);
+      return true;
+    });
+  }
+
+  clearRevokedDevices(userId?: string): { deletedDevices: number } {
+    return this.tx(() => {
+      const rows = userId
+        ? this.db.prepare('SELECT id FROM devices WHERE revoked=1 AND user_id=?').all(userId)
+        : this.db.prepare('SELECT id FROM devices WHERE revoked=1').all();
+      for (const row of rows) {
+        this.purgeDeviceRecord(String(row.id));
+      }
+      const deletedDevices = rows.length;
+      if (deletedDevices) this.audit('devices_revoked_cleared', { deletedDevices }, userId);
+      return { deletedDevices };
+    });
+  }
+
   markOffline(id: string, boot: string | null) {
     if (!boot) return;
     this.tx(() => {

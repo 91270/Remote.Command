@@ -101,6 +101,26 @@ code, pre { font-family: var(--mono); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+.auth-boot {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.auth-boot .brand-mark {
+  animation: auth-boot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes auth-boot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.65; transform: scale(0.96); }
+}
+
 /* --- Buttons & Inputs --- */
 button, .button-link {
   border: 1px solid transparent;
@@ -158,13 +178,14 @@ button, .button-link {
 }
 .icon-button:hover { color: var(--text); }
 
-input[type="text"], input[type="search"], select {
+input:not([type]), input[type="text"], input[type="search"], select {
   width: 100%;
   padding: 10px 13px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
+  font-size: 14px;
   outline: none;
   transition: border-color 180ms var(--ease), box-shadow 180ms var(--ease);
 }
@@ -174,10 +195,130 @@ input:focus, select:focus {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-label { display: block; font-size: 13px; font-weight: 500; color: var(--text-secondary); margin: 12px 0 6px; }
+.code-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 14px 0 8px;
+}
+.code-field-head label { margin: 0; }
+.code-slots {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr)) 14px repeat(5, minmax(0, 1fr));
+  align-items: center;
+  gap: 6px;
+}
+.code-slots input.code-slot {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 11px;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--text);
+  caret-color: var(--accent);
+}
+.code-slots input.code-slot.filled {
+  background: var(--surface);
+}
+.code-slots input.code-slot:focus {
+  background: var(--surface);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.code-dash {
+  width: 12px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+  justify-self: center;
+}
+
+label { display: block; font-size: 13px; font-weight: 500; color: var(--text-secondary); margin: 14px 0 6px; }
 .check { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--text); cursor: pointer; }
 fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; margin: 14px 0; }
 legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); padding: 0 6px; }
+
+.cap-group {
+  border: none;
+  padding: 0;
+  margin: 16px 0 10px;
+}
+.cap-group > legend {
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.cap-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cap-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 160ms var(--ease), background 160ms var(--ease);
+}
+.cap-option:hover { border-color: var(--accent); }
+.cap-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.cap-option input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.cap-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cap-text strong {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+.cap-text small {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.cap-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.cap-badge.readonly {
+  background: var(--green-soft);
+  color: var(--green);
+}
 
 .error { color: var(--red); font-size: 13px; margin: 10px 0 0; }
 .subtle { color: var(--text-secondary); font-size: 13px; margin: 6px 0; }
@@ -621,16 +762,24 @@ dialog {
   background: var(--surface);
   color: var(--text);
   padding: 24px 26px;
-  max-width: 540px;
+  max-width: 480px;
   width: calc(100% - 32px);
   box-shadow: var(--shadow-lg);
 }
 dialog.wide-dialog { max-width: 680px; }
 dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); }
 
-.dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
 .dialog-heading h2 { margin: 0; font-size: 19px; letter-spacing: -0.02em; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.dialog-sub { margin: 0 0 14px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
 
 .stepper {
   display: flex;
@@ -685,16 +834,30 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); 
   font-weight: 500;
 }
 
-.input-row { display: flex; gap: 8px; }
+.input-row { display: flex; align-items: stretch; gap: 10px; }
+.input-row input { flex: 1; min-width: 0; }
 .pairing-preview {
-  margin: 14px 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: var(--surface-subtle);
+  margin: 16px 0 4px;
+  padding: 13px 15px;
+  border-radius: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pairing-preview-main {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  min-width: 0;
 }
+.pairing-preview-main strong {
+  font-size: 15.5px;
+  letter-spacing: -0.01em;
+}
+.pairing-preview-main .subtle { margin: 0; font-size: 12px; }
 .output {
   background: var(--bg);
   border: 1px solid var(--border);

@@ -511,3 +511,119 @@ test('dashboard lists connected OAuth clients, tracks per-tenant activity, binds
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('dashboard deletes individual revoked devices and clears revoked devices per tenant without touching active or task records', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-clear-revoked-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const aliceRes = store.createGoogleUser({
+    sub: 'sub-alice-clear',
+    email: 'alice-clear@example.com',
+    displayName: 'Alice',
+    avatarUrl: null,
+    adminEmails: new Set()
+  });
+  store.setRegistrationMode('open');
+  const bobRes = store.createGoogleUser({
+    sub: 'sub-bob-clear',
+    email: 'bob-clear@example.com',
+    displayName: 'Bob',
+    avatarUrl: null,
+    adminEmails: new Set()
+  });
+  assert.equal(aliceRes.status, 'ok');
+  assert.equal(bobRes.status, 'ok');
+  const alice = aliceRes.user;
+  const bob = bobRes.user;
+
+  const dashboard = new Dashboard(store, { origin: 'http://127.0.0.1' });
+  const server = createServer(async (req, res) => {
+    try {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const d = new Dashboard(store, { origin });
+      if (!await d.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
+    } catch {
+      res.writeHead(500).end('Internal failure');
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+
+  const sessionToken = secret();
+  const csrf = secret();
+  store.putAuth(sessionToken, 'dashboard', 3600000, {
+    csrf,
+    userId: alice.id,
+    username: alice.email,
+    role: alice.role
+  });
+  const reqAsAlice = (path, data, overrides = {}) => fetch(origin + '/manage' + path, {
+    ...(data !== undefined && { method: 'POST', body: JSON.stringify(data) }),
+    headers: {
+      ...(data !== undefined && { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }),
+      Cookie: `rcm_dashboard=${sessionToken}`,
+      ...overrides
+    }
+  });
+
+  try {
+    void dashboard;
+    const activeDev = store.pair(store.invite('Alice-Active', ['read'], alice.id), secret());
+    const revokedOne = store.pair(store.invite('Alice-Revoked-1', ['read'], alice.id), secret());
+    const revokedTwo = store.pair(store.invite('Alice-Revoked-2', ['read'], alice.id), secret());
+    const bobRevoked = store.pair(store.invite('Bob-Revoked', ['read'], bob.id), secret());
+
+    // Populate retired_boots, device_catalog, and task history on revokedOne
+    const bootId = randomUUID();
+    store.sync(revokedOne.id, bootId, 'darwin', [], { tools: [], resources: [] });
+    const oldTask = store.submit(revokedOne.id, 'dc_call', { tool: 'read_file', arguments: { path: 'a.txt' } }, alice.id);
+    store.cancel(oldTask.id, alice.id);
+
+    store.revoke(revokedOne.id, alice.id);
+    store.revoke(revokedTwo.id, alice.id);
+    store.revoke(bobRevoked.id, bob.id);
+
+    // Auth & CSRF guards
+    assert.equal((await fetch(origin + '/manage/api/devices/clear-revoked', {
+      method: 'POST',
+      headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: '{}'
+    })).status, 401);
+    assert.equal((await reqAsAlice('/api/devices/clear-revoked', {}, { 'X-CSRF-Token': secret() })).status, 403);
+
+    // Active device or another user's revoked device cannot be deleted
+    assert.equal((await reqAsAlice(`/api/devices/${activeDev.id}/delete`, {})).status, 404);
+    assert.equal((await reqAsAlice(`/api/devices/${bobRevoked.id}/delete`, {})).status, 404);
+
+    // Delete one revoked device cleanly
+    assert.equal((await reqAsAlice(`/api/devices/${revokedOne.id}/delete`, {})).status, 200);
+    assert.equal(store.devices(alice.id).some(d => d.id === revokedOne.id), false);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM device_catalog WHERE device=?').get(revokedOne.id).n, 0);
+    assert.equal(store.db.prepare('SELECT count(*) AS n FROM retired_boots WHERE device=?').get(revokedOne.id).n, 0);
+    assert.equal(store.task(oldTask.id, alice.id)?.status, 'cancelled');
+
+    // Deleting already-deleted device returns 404
+    assert.equal((await reqAsAlice(`/api/devices/${revokedOne.id}/delete`, {})).status, 404);
+
+    // Clear remaining revoked devices for Alice only
+    const clearedRes = await reqAsAlice('/api/devices/clear-revoked', {});
+    assert.equal(clearedRes.status, 200);
+    assert.deepEqual(await clearedRes.json(), { ok: true, deletedDevices: 1 });
+
+    // Alice keeps her active device; Bob keeps his revoked device
+    assert.deepEqual(store.devices(alice.id).map(d => d.id), [activeDev.id]);
+    assert.deepEqual(store.devices(bob.id).map(d => d.id), [bobRevoked.id]);
+
+    // Clearing again when none left returns 0
+    const clearedAgain = await (await reqAsAlice('/api/devices/clear-revoked', {})).json();
+    assert.deepEqual(clearedAgain, { ok: true, deletedDevices: 0 });
+
+    const audit = await (await reqAsAlice('/api/audit')).json();
+    assert.equal(audit.records.some(r => r.event === 'device_deleted' && r.details.device === revokedOne.id), true);
+    assert.equal(audit.records.some(r => r.event === 'devices_revoked_cleared' && r.details.deletedDevices === 1), true);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});

@@ -97,6 +97,9 @@ let verifiedCode = '';
 let watchOnlineDeviceId = '';
 let watchOnlineBaselineCount = 0;
 let watchOnlineTimer = null;
+let noticeTimer = null;
+let pendingOnlineDeviceName = '';
+let pendingOnlineBaselineIds = new Set();
 
 // --- Theme Management (Light / Dark / System) ---
 function applyTheme(mode) {
@@ -132,11 +135,30 @@ function button(label, className, action) {
   return el;
 }
 
-function notice(message, failed = false) {
+function clearNoticeTimer() {
+  if (noticeTimer) {
+    clearTimeout(noticeTimer);
+    noticeTimer = null;
+  }
+}
+
+function notice(message, failed = false, options = {}) {
+  const { persist = false, autoHideMs = 5000 } = options;
+  clearNoticeTimer();
+  if (!persist) {
+    pendingOnlineDeviceName = '';
+    pendingOnlineBaselineIds.clear();
+  }
   const el = byId('notice');
   el.textContent = message;
   el.className = 'notice' + (failed ? ' error' : '');
   el.hidden = false;
+  if (!failed && !persist && autoHideMs > 0) {
+    noticeTimer = setTimeout(() => {
+      el.hidden = true;
+      noticeTimer = null;
+    }, autoHideMs);
+  }
 }
 
 async function api(path, data) {
@@ -220,10 +242,15 @@ async function copyElement(id, label) {
 // --- Auth & App Shell ---
 function showLogin() {
   stopOnlineWatch();
+  clearNoticeTimer();
+  pendingOnlineDeviceName = '';
+  pendingOnlineBaselineIds.clear();
   csrf = '';
   currentSession = null;
   byId('notice').hidden = true;
   byId('login-error').textContent = '';
+  const boot = byId('auth-boot');
+  if (boot) boot.hidden = true;
   byId('app-view').hidden = true;
   byId('login-view').hidden = false;
   document.querySelectorAll('dialog[open]').forEach(d => d.close());
@@ -253,6 +280,8 @@ function showLogin() {
 async function showApp(session) {
   csrf = session.csrf;
   currentSession = session;
+  const boot = byId('auth-boot');
+  if (boot) boot.hidden = true;
   byId('login-view').hidden = true;
   byId('app-view').hidden = false;
 
@@ -417,6 +446,9 @@ function renderDevices() {
   container.replaceChildren();
   const activeCount = devices.filter(d => !d.revoked).length;
   const onlineCount = devices.filter(d => d.online).length;
+  const revokedCount = devices.filter(d => d.revoked).length;
+  const clearRevokedBtn = byId('clear-revoked-devices');
+  if (clearRevokedBtn) clearRevokedBtn.hidden = revokedCount === 0;
   byId('device-count').textContent = activeCount
     ? `${onlineCount} 台在线 · 共 ${activeCount} 台已配对设备`
     : '还没有配对设备，点击右上角「+ 添加设备」开始。';
@@ -470,6 +502,13 @@ function renderDevices() {
         if (!await confirmAction('撤销设备', `确认撤销「${device.name}」？撤销后需重新配对，进行中任务将中断。`)) return;
         await api(`devices/${device.id}/revoke`, {});
         notice(`已撤销设备「${device.name}」。`);
+        await refresh();
+      }));
+    } else {
+      actions.appendChild(button('删除记录', 'secondary', async () => {
+        if (!await confirmAction('删除已撤销设备', `确认彻底移除「${device.name}」的已撤销设备记录？保留的历史任务与审计日志不受影响。`)) return;
+        await api(`devices/${device.id}/delete`, {});
+        notice(`已移除设备记录「${device.name}」。`);
         await refresh();
       }));
     }
@@ -660,33 +699,70 @@ async function confirmAction(title, description, initialName) {
 }
 
 // --- Device Code Verification ---
-function openVerification(prefill = '') {
+function getCodeSlots() {
+  return Array.from(document.querySelectorAll('#verify-code-slots .code-slot'));
+}
+
+function normalizeUserCode(value) {
+  return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
+}
+
+function syncCodeValue() {
+  const raw = getCodeSlots().map(slot => normalizeUserCode(slot.value)).join('');
+  const formatted = raw.length > 5 ? raw.slice(0, 5) + '-' + raw.slice(5) : raw;
+  byId('verify-code').value = formatted;
+  return { raw, formatted };
+}
+
+function fillCodeSlots(value) {
+  const chars = normalizeUserCode(value).split('');
+  const slots = getCodeSlots();
+  slots.forEach((slot, idx) => {
+    slot.value = chars[idx] || '';
+    slot.classList.toggle('filled', !!slot.value);
+  });
+  return syncCodeValue();
+}
+
+function resetVerificationPreview() {
   verifiedCode = '';
-  byId('verify-form').reset();
-  byId('verify-code').value = prefill;
   byId('verify-details').hidden = true;
   byId('verify-actions').hidden = true;
+}
+
+function openVerification(prefill = '') {
+  resetVerificationPreview();
+  byId('verify-form').reset();
+  const { raw } = fillCodeSlots(prefill);
   byId('verify-error').textContent = '';
   byId('verify-dialog').showModal();
-  if (prefill) act(lookupDeviceCode);
+  if (raw.length === 10) {
+    act(lookupDeviceCode);
+  } else {
+    const slots = getCodeSlots();
+    if (slots[0]) slots[0].focus();
+  }
 }
 
 async function lookupDeviceCode() {
-  const code = byId('verify-code').value.trim();
-  if (!code) return;
+  const { raw, formatted } = syncCodeValue();
+  if (!raw) return;
+  if (raw.length < 10) {
+    resetVerificationPreview();
+    byId('verify-error').textContent = '请输入完整的 10 位配对码。';
+    return;
+  }
   byId('verify-error').textContent = '';
   try {
-    const info = await api('device-preview', { user_code: code });
-    verifiedCode = code;
+    const info = await api('device-preview', { user_code: formatted });
+    verifiedCode = formatted;
     byId('verify-host').textContent = info.deviceName;
     byId('verify-expiry').textContent = '有效期至 ' + formatTime(info.expiresAt);
     byId('verify-name').value = info.deviceName;
     byId('verify-details').hidden = false;
     byId('verify-actions').hidden = false;
   } catch (err) {
-    verifiedCode = '';
-    byId('verify-details').hidden = true;
-    byId('verify-actions').hidden = true;
+    resetVerificationPreview();
     byId('verify-error').textContent = err.message;
   }
 }
@@ -698,7 +774,13 @@ async function submitDeviceDecision(approve) {
   const name = (data.get('name') || '').toString().trim() || undefined;
   const res = await api('device-verify', { user_code: verifiedCode, name, capabilities: caps.length ? caps : ['read'], approve });
   byId('verify-dialog').close();
-  notice(approve ? `已授权设备「${res.deviceName}」，等待设备完成上线。` : `已拒绝设备「${res.deviceName}」的配对请求。`);
+  if (approve) {
+    pendingOnlineDeviceName = res.deviceName || '';
+    pendingOnlineBaselineIds = new Set(devices.filter(d => !d.revoked && d.online).map(d => d.id));
+    notice(`已授权设备「${res.deviceName}」，等待设备完成上线。`, false, { persist: true });
+  } else {
+    notice(`已拒绝设备「${res.deviceName}」的配对请求。`);
+  }
   await refresh();
 }
 
@@ -791,6 +873,17 @@ async function refresh() {
     const overview = await api('overview');
     devices = overview.devices;
     renderDevices();
+    if (pendingOnlineDeviceName) {
+      const onlineDevice = devices.find(
+        d => !d.revoked && d.online && d.name === pendingOnlineDeviceName && !pendingOnlineBaselineIds.has(d.id)
+      );
+      if (onlineDevice) {
+        const onlineName = onlineDevice.name;
+        pendingOnlineDeviceName = '';
+        pendingOnlineBaselineIds.clear();
+        notice(`设备「${onlineName}」已成功上线！`, false, { autoHideMs: 4000 });
+      }
+    }
     renderQuotaAndUsage(overview.totalCalls || 0);
     byId('last-refresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     if (activePanel === 'activity') {
@@ -916,6 +1009,57 @@ byId('pair-form').addEventListener('submit', event => {
 byId('pair-done').addEventListener('click', () => { byId('pair-dialog').close(); act(refresh); });
 byId('pair-dialog').addEventListener('close', () => { byId('pair-token').textContent = ''; });
 byId('lookup-device').addEventListener('click', () => act(lookupDeviceCode));
+getCodeSlots().forEach((slot, idx, slots) => {
+  slot.addEventListener('focus', () => slot.select());
+  slot.addEventListener('input', () => {
+    const cleaned = normalizeUserCode(slot.value);
+    if (cleaned.length > 1) {
+      const merged = slots.map((s, i) => (i === idx ? cleaned : normalizeUserCode(s.value))).join('');
+      const { raw } = fillCodeSlots(merged);
+      const nextIdx = Math.min(idx + cleaned.length, slots.length - 1);
+      slots[nextIdx].focus();
+      if (raw.length === 10) act(lookupDeviceCode);
+      else resetVerificationPreview();
+      return;
+    }
+    slot.value = cleaned;
+    slot.classList.toggle('filled', !!cleaned);
+    byId('verify-error').textContent = '';
+    const { raw } = syncCodeValue();
+    if (cleaned && idx < slots.length - 1) {
+      slots[idx + 1].focus();
+    }
+    if (raw.length === 10) act(lookupDeviceCode);
+    else resetVerificationPreview();
+  });
+  slot.addEventListener('keydown', event => {
+    if (event.key === 'Backspace' && !slot.value && idx > 0) {
+      event.preventDefault();
+      slots[idx - 1].value = '';
+      slots[idx - 1].classList.remove('filled');
+      slots[idx - 1].focus();
+      syncCodeValue();
+      resetVerificationPreview();
+    } else if (event.key === 'ArrowLeft' && idx > 0) {
+      event.preventDefault();
+      slots[idx - 1].focus();
+    } else if (event.key === 'ArrowRight' && idx < slots.length - 1) {
+      event.preventDefault();
+      slots[idx + 1].focus();
+    }
+  });
+  slot.addEventListener('paste', event => {
+    const pasted = (event.clipboardData || window.clipboardData)?.getData('text') || '';
+    const cleaned = normalizeUserCode(pasted);
+    if (!cleaned) return;
+    event.preventDefault();
+    const { raw } = fillCodeSlots(cleaned);
+    const focusIdx = Math.min(raw.length, slots.length - 1);
+    slots[focusIdx].focus();
+    if (raw.length === 10) act(lookupDeviceCode);
+    else resetVerificationPreview();
+  });
+});
 byId('verify-form').addEventListener('submit', event => { event.preventDefault(); act(() => submitDeviceDecision(true)); });
 byId('deny-device').addEventListener('click', () => act(() => submitDeviceDecision(false)));
 
@@ -940,10 +1084,10 @@ byId('revoke-oauth').addEventListener('click', () => act(async () => {
   await refreshOAuthClients();
 }));
 
-byId('revoke-all-devices').addEventListener('click', () => act(async () => {
-  if (!await confirmAction('撤销全部设备', '所有已配对设备都需要重新配对。未完成任务将标为中断，待处理配对码和邀请也会失效。')) return;
-  const { revokedDevices, invalidatedPairings } = await api('devices/revoke-all', {});
-  notice(`已撤销 ${revokedDevices} 台设备，已作废 ${invalidatedPairings} 项配对记录。`);
+byId('clear-revoked-devices').addEventListener('click', () => act(async () => {
+  if (!await confirmAction('清理已撤销设备', '确认清空当前列表中的所有已撤销设备记录？在线和离线活跃设备以及历史任务记录不会受影响。')) return;
+  const { deletedDevices } = await api('devices/clear-revoked', {});
+  notice(`已清理 ${deletedDevices} 条已撤销设备记录。`);
   await refresh();
 }));
 
@@ -958,8 +1102,13 @@ document.querySelectorAll('[data-close]').forEach(close => close.addEventListene
 renderPromptLibrary();
 
 act(async () => {
-  try { await showApp(await api('session')); }
-  catch { showLogin(); }
+  try {
+    const res = await fetch('/manage/api/session', { credentials: 'same-origin' });
+    if (!res.ok) { showLogin(); return; }
+    await showApp(await res.json());
+  } catch {
+    showLogin();
+  }
 });
 
 setInterval(() => { if (csrf && !document.hidden) act(refresh); }, 5000);

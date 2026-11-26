@@ -179,12 +179,20 @@ export class Dashboard {
         json(res, 200, this.store.revokeAllDevices(userId));
         return true;
       }
-      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke)$/.exec(url.pathname);
+      if (req.method === 'POST' && url.pathname === '/manage/api/devices/clear-revoked') {
+        z.strictObject({}).parse(await readJson(req, 4096));
+        json(res, 200, { ok: true, ...this.store.clearRevokedDevices(userId) });
+        return true;
+      }
+      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke|delete)$/.exec(url.pathname);
       if (req.method === 'POST' && deviceAction) {
         const id = uuid.parse(deviceAction[1]);
         if (deviceAction[2] === 'revoke') {
           z.strictObject({}).parse(await readJson(req, 4096));
           if (!this.store.revoke(id, userId)) throw new HttpError(404, 'Device is unknown or already revoked.');
+        } else if (deviceAction[2] === 'delete') {
+          z.strictObject({}).parse(await readJson(req, 4096));
+          if (!this.store.deleteRevokedDevice(id, userId)) throw new HttpError(404, 'Device is unknown or not revoked.');
         } else {
           const input = z.strictObject({ name: deviceName }).parse(await readJson(req, 4096));
           if (!this.store.renameDevice(id, input.name, userId)) throw new HttpError(404, 'Device is unknown or revoked.');

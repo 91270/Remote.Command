@@ -9,7 +9,11 @@
   <script src="/manage/assets/dashboard.js" defer></script>
 </head>
 <body>
-  <section id="login-view" class="login-view">
+  <div id="auth-boot" class="auth-boot" role="status" aria-live="polite">
+    <span class="brand-mark" aria-hidden="true">RC</span>
+    <span class="auth-boot-text">正在进入控制台…</span>
+  </div>
+  <section id="login-view" class="login-view" hidden>
     <div class="login-intro">
       <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">RC</span><span>Remote.Command</span></a>
       <h1>连接你的<br>每一台设备</h1>
@@ -102,7 +106,7 @@
               <p id="device-count">正在读取设备列表…</p>
             </div>
             <div class="heading-actions">
-              <button id="revoke-all-devices" type="button" class="danger">撤销全部</button>
+              <button id="clear-revoked-devices" type="button" class="secondary" hidden>清理已撤销</button>
               <button id="verify-device" type="button" class="secondary">输入配对码</button>
               <button id="new-device" type="button" class="primary">+ 添加设备</button>
             </div>
@@ -458,11 +462,26 @@
   <dialog id="pair-dialog" aria-labelledby="pair-title">
     <form id="pair-form">
       <div class="dialog-heading"><h2 id="pair-title">创建一次性令牌</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-      <label for="device-name">设备名称</label><input id="device-name" name="name" maxlength="80" required>
-      <fieldset><legend>设备权限</legend>
-        <label class="check"><input type="checkbox" name="capabilities" value="read" checked>读取与搜索</label>
-        <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
-        <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
+      <p class="dialog-sub">生成一个 10 分钟内有效的配对令牌，用于无浏览器环境的设备接入。</p>
+      <label for="device-name">设备名称</label><input id="device-name" name="name" type="text" maxlength="80" placeholder="例如：MacBook-Pro" required>
+      <fieldset class="cap-group"><legend>设备权限</legend>
+        <div class="cap-list">
+          <label class="cap-option">
+            <input type="checkbox" name="capabilities" value="read" checked>
+            <span class="cap-text"><strong>读取与搜索</strong><small>浏览目录、读取和搜索工作区文件</small></span>
+            <span class="cap-badge readonly">只读</span>
+          </label>
+          <label class="cap-option">
+            <input type="checkbox" name="capabilities" value="write">
+            <span class="cap-text"><strong>写入与编辑</strong><small>新建、修改或移动工作区内的文件</small></span>
+            <span class="cap-badge">需本机审批</span>
+          </label>
+          <label class="cap-option">
+            <input type="checkbox" name="capabilities" value="exec">
+            <span class="cap-text"><strong>运行命令</strong><small>启动本地终端命令与管理进程会话</small></span>
+            <span class="cap-badge">需本机审批</span>
+          </label>
+        </div>
       </fieldset>
       <div class="dialog-actions"><button type="button" data-close class="secondary">取消</button><button class="primary" type="submit">生成令牌</button></div>
     </form>
@@ -480,16 +499,54 @@
   <dialog id="verify-dialog" aria-labelledby="verify-title">
     <form id="verify-form">
       <div class="dialog-heading"><h2 id="verify-title">确认设备配对</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
-      <label for="verify-code">终端显示的配对码</label>
-      <div class="input-row"><input id="verify-code" name="user_code" required maxlength="32" autocomplete="off" placeholder="ABCDE-FGHIJ"><button id="lookup-device" type="button" class="secondary">核对设备</button></div>
+      <p class="dialog-sub">核对终端显示的配对短码并选择授予该设备的权限边界。</p>
+      <div class="code-field-head">
+        <label for="verify-code-0">终端显示的配对码</label>
+        <button id="lookup-device" type="button" class="text-button">核对设备</button>
+      </div>
+      <input id="verify-code" name="user_code" type="hidden">
+      <div id="verify-code-slots" class="code-slots" role="group" aria-label="10 位设备配对码">
+        <input id="verify-code-0" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 1 位">
+        <input id="verify-code-1" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 2 位">
+        <input id="verify-code-2" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 3 位">
+        <input id="verify-code-3" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 4 位">
+        <input id="verify-code-4" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 5 位">
+        <span class="code-dash" aria-hidden="true"></span>
+        <input id="verify-code-5" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 6 位">
+        <input id="verify-code-6" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 7 位">
+        <input id="verify-code-7" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 8 位">
+        <input id="verify-code-8" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 9 位">
+        <input id="verify-code-9" class="code-slot" type="text" maxlength="2" autocomplete="off" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="配对码第 10 位">
+      </div>
       <div id="verify-details" hidden>
-        <div class="pairing-preview"><span class="subtle">请求配对的设备</span><strong id="verify-host"></strong><small id="verify-expiry" class="subtle"></small></div>
+        <div class="pairing-preview">
+          <div class="pairing-preview-main">
+            <span class="subtle">请求配对的设备</span>
+            <strong id="verify-host"></strong>
+            <small id="verify-expiry" class="subtle"></small>
+          </div>
+          <span class="pill">待确认</span>
+        </div>
         <label for="verify-name">设备显示名称（可选）</label>
-        <input id="verify-name" name="name" maxlength="80">
-        <fieldset><legend>授予设备的权限</legend>
-          <label class="check"><input type="checkbox" name="capabilities" value="read" checked>读取与搜索</label>
-          <label class="check"><input type="checkbox" name="capabilities" value="write">写入与编辑</label>
-          <label class="check"><input type="checkbox" name="capabilities" value="exec">运行命令</label>
+        <input id="verify-name" name="name" type="text" maxlength="80" placeholder="输入便于识别的设备名">
+        <fieldset class="cap-group"><legend>授予设备的权限</legend>
+          <div class="cap-list">
+            <label class="cap-option">
+              <input type="checkbox" name="capabilities" value="read" checked>
+              <span class="cap-text"><strong>读取与搜索</strong><small>浏览目录、读取和搜索工作区文件</small></span>
+              <span class="cap-badge readonly">只读</span>
+            </label>
+            <label class="cap-option">
+              <input type="checkbox" name="capabilities" value="write">
+              <span class="cap-text"><strong>写入与编辑</strong><small>新建、修改或移动工作区内的文件</small></span>
+              <span class="cap-badge">需本机审批</span>
+            </label>
+            <label class="cap-option">
+              <input type="checkbox" name="capabilities" value="exec">
+              <span class="cap-text"><strong>运行命令</strong><small>启动本地终端命令与管理进程会话</small></span>
+              <span class="cap-badge">需本机审批</span>
+            </label>
+          </div>
         </fieldset>
         <p class="subtle">实际执行边界同时受设备本地配置限制。</p>
       </div>
@@ -514,7 +571,7 @@
     <form method="dialog">
       <div class="dialog-heading"><h2 id="confirm-title"></h2><button value="cancel" class="icon-button" aria-label="关闭">×</button></div>
       <p id="confirm-description" class="subtle"></p>
-      <label id="rename-label" for="rename-value" hidden>设备名称</label><input id="rename-value" maxlength="80" hidden>
+      <label id="rename-label" for="rename-value" hidden>设备名称</label><input id="rename-value" type="text" maxlength="80" hidden>
       <div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="confirm-submit" value="confirm" class="primary">确认</button></div>
     </form>
   </dialog>
