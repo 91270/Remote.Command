@@ -190,7 +190,7 @@ export class Dashboard {
         json(res, 200, { ok: true, ...this.store.clearRevokedDevices(userId) });
         return true;
       }
-      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke|delete|approval-mode)$/.exec(url.pathname);
+      const deviceAction = /^\/manage\/api\/devices\/([^/]+)\/(rename|revoke|delete|approval-mode|policy)$/.exec(url.pathname);
       if (req.method === 'POST' && deviceAction) {
         const id = uuid.parse(deviceAction[1]);
         if (deviceAction[2] === 'revoke') {
@@ -199,6 +199,15 @@ export class Dashboard {
         } else if (deviceAction[2] === 'delete') {
           z.strictObject({}).parse(await readJson(req, 4096));
           if (!this.store.deleteRevokedDevice(id, userId)) throw new HttpError(404, 'Device is unknown or not revoked.');
+        } else if (deviceAction[2] === 'policy') {
+          const input = z.strictObject({
+            capabilities: z.array(z.enum(capabilities)).min(1).max(3),
+            approvalMode: z.enum(approvalModes)
+          }).parse(await readJson(req, 4096));
+          if (new Set(input.capabilities).size !== input.capabilities.length) throw new HttpError(400, 'Duplicate capability.');
+          if (!this.store.setDevicePolicy(id, input.capabilities, input.approvalMode, userId)) throw new HttpError(404, 'Device is unknown or revoked.');
+          json(res, 200, { ok: true, capabilities: input.capabilities, approvalMode: input.approvalMode });
+          return true;
         } else if (deviceAction[2] === 'approval-mode') {
           const input = z.strictObject({ approvalMode: z.enum(approvalModes) }).parse(await readJson(req, 4096));
           if (!this.store.setDeviceApprovalMode(id, input.approvalMode, userId)) throw new HttpError(404, 'Device is unknown or revoked.');

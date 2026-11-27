@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { serviceDefinition } from '../dist/agent-service.js';
+import { configureAgent } from '../dist/remote-cli.js';
 import { approvalModes, needsLocalApproval } from '../dist/protocol.js';
 
 test('service manifests preserve paths and supervise the Agent as a regular user', () => {
@@ -76,4 +78,32 @@ test('needsLocalApproval maps approval modes to capabilities', () => {
   assert.equal(needsLocalApproval('strict', 'read'), false);
   assert.equal(needsLocalApproval('strict', 'write'), true);
   assert.equal(needsLocalApproval('strict', 'exec'), true);
+});
+
+test('configureAgent uses safe fallback workspace without local capability configuration', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'rcm-onboard-'));
+  const prevHome = process.env.HOME;
+  const prevCwd = process.cwd();
+  try {
+    process.env.HOME = home;
+    process.chdir(resolve('.'));
+    const cfgFile = join(home, '.remote-command', 'agent.json');
+    await configureAgent(cfgFile, true, { gateway: 'https://mcp.example.com' });
+    const parsed = JSON.parse(readFileSync(cfgFile, 'utf8'));
+    assert.equal(parsed.gateway, 'https://mcp.example.com');
+    assert.ok(parsed.workspace.endsWith('RemoteCommand-Workspace'));
+    assert.equal(parsed.capabilities, undefined);
+
+    const customWs = join(home, 'custom-ws');
+    mkdirSync(customWs);
+    const customCfg = join(home, '.remote-command', 'custom.json');
+    await configureAgent(customCfg, false, { gateway: 'https://mcp.example.com', workspace: customWs });
+    const parsedCustom = JSON.parse(readFileSync(customCfg, 'utf8'));
+    assert.equal(parsedCustom.capabilities, undefined);
+    assert.ok(parsedCustom.workspace.endsWith('custom-ws'));
+  } finally {
+    process.chdir(prevCwd);
+    process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

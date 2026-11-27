@@ -41,7 +41,7 @@ export function classifyBlockSource(clientError?: string, likelyReason?: string)
   if (/path not allowed|allowed\s*directories|outside\s*(the\s*)?(agent\s*)?workspace|directory not allowed/i.test(combined)) {
     return 'local_path_policy';
   }
-  if (/operation denied by local agent|not paired for this operation|local capability/i.test(combined)) {
+  if (/operation denied by local agent|not permitted for this device|not paired for this operation|local capability/i.test(combined)) {
     return 'local_capability';
   }
   return 'host_safety';
@@ -71,8 +71,8 @@ export function guidanceForReview(source: BlockSource, cap: Capability, hasManua
       ];
     case 'local_capability':
       return [
-        '目标设备的本地 Agent 配置未启用该操作所需的 write / exec 权限。',
-        '请检查设备本机 agent.json 中的 capabilities 白名单及配对授权范围。'
+        '目标设备当前未授权该操作所需的 write / exec 权限。',
+        '请在 Web 控制台重新配对设备并勾选对应权限（read / write / exec）。'
       ];
     case 'host_safety': {
       const steps = [

@@ -150,5 +150,6 @@ test('sync includes deviceName and owner userEmail on non-fast-path responses', 
     const reply = syncReply.parse(store.sync(device, boot, 'darwin', []));
     assert.equal(reply.deviceName, 'macbook-pro');
     assert.equal(reply.userEmail, 'owner@example.com');
+    assert.deepEqual(reply.capabilities, ['read', 'exec']);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

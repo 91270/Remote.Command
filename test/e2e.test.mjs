@@ -254,8 +254,7 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     await writeFile(join(ws, 'hello.txt'), 'there is a needle\r\nsecond line\r\n');
     await writeFile(oauthSecretFile, clientSecret + '\n');
     await writeFile(ownerKeyFile, owner + '\n');
-    await writeFile(config, JSON.stringify({ gateway: agentOrigin, workspace: ws, stateDir, allowInsecureLoopback: !proxy,
-      capabilities: ['read', 'write', 'exec'] }));
+    await writeFile(config, JSON.stringify({ gateway: agentOrigin, workspace: ws, stateDir, allowInsecureLoopback: !proxy }));
     const seedStore = new Store(db);
     const createdOwner = seedStore.createGoogleUser({
       sub: 'e2e-owner-sub',

@@ -11,9 +11,44 @@ if (first === '--help' || first === '-h') {
   console.log('On Windows: .\\launch.ps1 [CONFIG] [options]');
   process.exit(0);
 }
+function detectLocalGatewayOrigin(projectRoot) {
+  const direct = (process.env.RCM_GATEWAY ?? process.env.PUBLIC_ORIGIN ?? '').trim();
+  const isUsable = value => value.startsWith('https://') && !value.includes('example.com') && !value.includes('你的域名');
+  if (isUsable(direct)) return direct;
+  const envFile = join(projectRoot, 'state', 'local-test.env');
+  if (!existsSync(envFile)) return undefined;
+  try {
+    const content = readFileSync(envFile, 'utf8').replace(/^\uFEFF/, '');
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const match = /^(?:export\s+)?PUBLIC_ORIGIN\s*=\s*(.+)$/.exec(line);
+      if (!match) continue;
+      let val = match[1].trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1).trim();
+      }
+      if (isUsable(val)) return val;
+    }
+  } catch {
+    // Ignore unreadable local env file.
+  }
+  return undefined;
+}
+
+const hasExplicitConfig = (first && !first.startsWith('-'))
+  || args.includes('--config')
+  || args.some(arg => arg.startsWith('--config='));
+const hasGatewayArg = args.includes('--gateway') || args.some(arg => arg.startsWith('--gateway='));
+const isMaintenanceOnly = args.includes('--logout') || args.includes('--report');
+
 const remoteArgs = first && !first.startsWith('-')
   ? ['remote', '--config', resolve(first), ...args.slice(1)]
   : ['remote', ...args];
+if (!hasExplicitConfig && !hasGatewayArg && !isMaintenanceOnly) {
+  const detectedGateway = detectLocalGatewayOrigin(project);
+  if (detectedGateway) remoteArgs.push('--gateway', detectedGateway);
+}
 
 const [major] = process.versions.node.split('.').map(Number);
 if (major < 24 || major >= 27) throw new Error('Use Node.js 24–26 or start with the platform launcher.');

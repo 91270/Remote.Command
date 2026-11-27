@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, capabilities, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
@@ -13,6 +13,18 @@ const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interru
 const operationPlaceholders = names.map(() => '?').join(',');
 const normalizeApprovalMode = (raw: unknown): ApprovalMode =>
   typeof raw === 'string' && approvalModes.some(m => m === raw) ? (raw as ApprovalMode) : 'client';
+function parseDeviceCaps(raw: unknown): Capability[] | undefined {
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 3) return undefined;
+    return parsed.every(item => typeof item === 'string' && capabilities.some(c => c === item))
+      ? (parsed as Capability[])
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 type DeviceRow = {
   id: string; user_id: string | null; name: string; credential: string; caps: string;
@@ -577,6 +589,18 @@ export class Store {
     });
   }
 
+  setDevicePolicy(id: string, caps: Capability[], approvalMode: ApprovalMode, userId?: string): boolean {
+    return this.tx(() => {
+      const encodedCaps = JSON.stringify(caps);
+      const res = userId
+        ? this.db.prepare('UPDATE devices SET caps=?, approval_mode=? WHERE id=? AND user_id=? AND revoked=0').run(encodedCaps, approvalMode, id, userId)
+        : this.db.prepare('UPDATE devices SET caps=?, approval_mode=? WHERE id=? AND revoked=0').run(encodedCaps, approvalMode, id);
+      if (!res.changes) return false;
+      this.audit('device_policy_updated', { device: id, capabilities: caps, approvalMode }, userId);
+      return true;
+    });
+  }
+
   revoke(id: string, userId?: string) {
     return this.tx(() => {
       const row = userId
@@ -829,13 +853,20 @@ export class Store {
     if (ready && updates.length === 0 && !catalog) {
       const mem = this.liveSeen.get(device);
       if (mem && mem.boot === boot && mem.platform === platform) {
-        const devCheck = this.db.prepare('SELECT boot,revoked,approval_mode FROM devices WHERE id=?').get(device) as { boot: string | null; revoked: number; approval_mode?: string | null } | undefined;
+        const devCheck = this.db.prepare('SELECT boot,revoked,caps,approval_mode FROM devices WHERE id=?').get(device) as { boot: string | null; revoked: number; caps?: string; approval_mode?: string | null } | undefined;
         if (devCheck && !devCheck.revoked && devCheck.boot === boot) {
           const hasWork = this.db.prepare(`SELECT 1 FROM tasks WHERE device=? AND status IN ${outstandingSql} LIMIT 1`).get(device);
           if (!hasWork) {
             mem.seen = now;
             mem.dirty = true;
-            return { jobs: [], cancel: [], ack: [], approvalMode: normalizeApprovalMode(devCheck.approval_mode) };
+            const fastCaps = parseDeviceCaps(devCheck.caps);
+            return {
+              jobs: [],
+              cancel: [],
+              ack: [],
+              approvalMode: normalizeApprovalMode(devCheck.approval_mode),
+              ...(fastCaps ? { capabilities: fastCaps } : {})
+            };
           }
         }
       }
@@ -875,9 +906,11 @@ export class Store {
       const ownerRow = dev.user_id
         ? (this.db.prepare('SELECT email FROM users WHERE id=?').get(dev.user_id) as { email?: string | null } | undefined)
         : undefined;
+      const parsedCaps = parseDeviceCaps(dev.caps);
       const deviceMeta = {
         ...(dev.name ? { deviceName: String(dev.name).slice(0, 128) } : {}),
-        ...(ownerRow?.email ? { userEmail: String(ownerRow.email).slice(0, 256) } : {})
+        ...(ownerRow?.email ? { userEmail: String(ownerRow.email).slice(0, 256) } : {}),
+        ...(parsedCaps ? { capabilities: parsedCaps } : {})
       };
       const active = this.db.prepare(`SELECT * FROM tasks WHERE device=? AND status IN ${liveSql} ORDER BY created`).all(device) as TaskRow[];
       if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack, approvalMode, ...deviceMeta };

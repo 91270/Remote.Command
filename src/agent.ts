@@ -12,7 +12,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, type AgentConfig } from './agent-config.js';
 import { createAgentUi, formatDuration } from './agent-ui.js';
-import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, needsLocalApproval, operations, projectVersion, secret, syncReply, terminal, uuid, work, type ApprovalMode, type Update, type Work, type Catalog } from './protocol.js';
+import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, needsLocalApproval, operations, projectVersion, secret, syncReply, terminal, uuid, work, type ApprovalMode, type Capability, type Update, type Work, type Catalog } from './protocol.js';
 import { programEnv } from './workspace.js';
 import { clientEvents } from './client-events.js';
 import { deviceLogin, deviceLogout, deviceReport, deviceStatus, agentLock, keepAwake, identity, identityFile, requireUnpaired, saveIdentity, withIdentityLock, revokeIdentity, type DeviceIdentity } from './client-commands.js';
@@ -80,6 +80,7 @@ type RunOptions = {
   logToFile: boolean;
   noSleepActive: boolean;
   sessionSource: 'persisted' | 'paired' | 'temporary';
+  allowAutoRepair?: boolean;
 };
 
 async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
@@ -110,12 +111,15 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
   let executorRecovery: Promise<void> | undefined;
   let promptChain: Promise<void> = Promise.resolve();
   let approvalMode: ApprovalMode = 'client';
+  let grantedCapabilities: Capability[] = ['read', 'write', 'exec'];
   let deviceName = hostname().slice(0, 128) || 'Remote Command Agent';
   let userEmail: string | undefined;
   let hadCoreReady = false;
+  let hasSynced = false;
   let hasPrintedReady = false;
   let offlineSince = 0;
   let unreachableAttempts = 0;
+  let autoRepairing = false;
   type Active = { state: Update; abort: AbortController; finished?: Promise<void> };
   const jobs = new Map<string, Active>();
   let dcClient: Client | undefined;
@@ -179,7 +183,8 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
       ui.debug(`Local core readiness check failed; retrying in ${formatDuration(retryExecutorAt - Date.now())}`);
     }).finally(() => { executorRecovery = undefined; });
   }
-  for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => shutdown.abort());
+  const onSignal = () => shutdown.abort();
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, onSignal);
   function enqueueForegroundApproval(
     job: Work,
     request: string,
@@ -239,7 +244,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
       try {
         signal.throwIfAborted();
         effective = capability(job.op, job.args);
-        if (!cfg.capabilities.includes(effective)) throw new Error('Operation denied by local Agent configuration.');
+        if (!grantedCapabilities.includes(effective)) throw new Error('Operation is not permitted for this device pairing.');
         const args = operations[job.op].parse(job.args);
         if (needsLocalApproval(approvalMode, effective)) {
           const req = { job: { ...job, args }, nonce: randomUUID(), expires: Date.now() + approvalMs };
@@ -313,17 +318,32 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
       ...(!catalogSynced && catalogToSend ? { catalog: catalogToSend } : {})
     }, auth.credential);
     if (response.status === 401 || response.status === 409) {
-      const err = new EnrollmentEnded('Agent pairing was revoked or replaced; stop and check device enrollment.');
+      const revokedOnStartup = response.status === 401 && !hasSynced;
+      const err = new EnrollmentEnded('Agent pairing was revoked or replaced; stop and check device enrollment.', revokedOnStartup);
       events.record({ event: 'pairing_revoked' });
-      ui.error('⚠️ Agent pairing was revoked or replaced; stopping.');
+      if (revokedOnStartup && opts.allowAutoRepair) {
+        autoRepairing = true;
+        ui.warn('⚠️ Saved device pairing was revoked on the Gateway. Clearing stale session and re-pairing...');
+      } else {
+        ui.error('⚠️ Agent pairing was revoked or replaced; stopping.');
+      }
       shutdown.abort(err);
       throw err;
     }
     if (!response.ok) throw new Error(`Gateway sync HTTP ${response.status}`);
     const reply = syncReply.parse(await response.json());
+    hasSynced = true;
     lastSync = Date.now();
     if (reply.deviceName) deviceName = reply.deviceName;
     if (reply.userEmail) userEmail = reply.userEmail;
+    if (reply.capabilities?.length) {
+      const same = reply.capabilities.length === grantedCapabilities.length
+        && reply.capabilities.every((cap, index) => cap === grantedCapabilities[index]);
+      if (!same) {
+        grantedCapabilities = reply.capabilities;
+        if (hasPrintedReady) ui.info(`🛡️ Permissions synced: ${grantedCapabilities.join(', ')}`);
+      }
+    }
     if (reply.approvalMode && reply.approvalMode !== approvalMode) {
       approvalMode = reply.approvalMode;
       if (hasPrintedReady) ui.approvalModeChanged(approvalMode);
@@ -359,7 +379,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
               deviceName,
               gateway: cfg.origin,
               workspace: cfg.workspace,
-              capabilities: cfg.capabilities,
+              capabilities: grantedCapabilities,
               approvalMode,
               version: projectVersion,
               logDir,
@@ -399,7 +419,8 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
       wakeSync = undefined;
     }
   } finally {
-    ui.disconnecting(disconnectTask ? 'remote disconnect requested' : undefined);
+    for (const sig of ['SIGINT', 'SIGTERM'] as const) process.off(sig, onSignal);
+    if (!autoRepairing) ui.disconnecting(disconnectTask ? 'remote disconnect requested' : undefined);
     for (const job of jobs.values()) job.abort.abort();
     await Promise.allSettled([...jobs.values()].map(j => j.finished));
     await executorRecovery;
@@ -407,7 +428,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
     await fetchJson(cfg, '/device/offline', { boot }, auth.credential).catch(() => {});
     events.record({ event: 'stopped' });
     await events.flush();
-    ui.disconnected();
+    if (!autoRepairing) ui.disconnected();
   }
 }
 const help = `Usage: remote-command agent connect|run|login|pair|logout|report|status|approvals CONFIG
@@ -420,7 +441,13 @@ connect pairs in a browser when no local identity exists and then starts the Age
   -v, --verbose           Show expanded tool arguments and output previews.
   --log-file              Write plain-text rotating logs under <stateDir>/logs.
   --debug                 Show executor recovery details.`;
-class EnrollmentEnded extends Error {}
+class EnrollmentEnded extends Error {
+  readonly revokedOnStartup: boolean;
+  constructor(message: string, revokedOnStartup = false) {
+    super(message);
+    this.revokedOnStartup = revokedOnStartup;
+  }
+}
 export async function runAgentCli(argv: string[]) {
   const [cmd, file, ...args] = argv;
   if (cmd === '--help' || cmd === '-h') { console.log(help); return; }
@@ -457,12 +484,24 @@ export async function runAgentCli(argv: string[]) {
       const verbose = args.includes('--verbose') || args.includes('-v');
       const serviceMode = args.includes('--service');
       const logToFile = cfg.logToFile || args.includes('--log-file');
-      try { await run(cfg, auth, { debug, verbose, serviceMode, logToFile, noSleepActive: awake.active, sessionSource }); }
-      catch (error) {
-        if (!serviceMode || !(error instanceof EnrollmentEnded)) throw error;
-        console.error(error.message);
+      const allowAutoRepair = cmd === 'connect' && !serviceMode && !temporary && sessionSource === 'persisted';
+      try {
+        await run(cfg, auth, { debug, verbose, serviceMode, logToFile, noSleepActive: awake.active, sessionSource, allowAutoRepair });
+      } catch (error) {
+        if (error instanceof EnrollmentEnded && error.revokedOnStartup && allowAutoRepair) {
+          await withIdentityLock(cfg, () => unlink(identityFile(cfg)).catch((err: NodeJS.ErrnoException) => {
+            if (err.code !== 'ENOENT') throw err;
+          }));
+          auth = await deviceLogin(cfg, !args.includes('--no-browser'));
+          await run(cfg, auth, { debug, verbose, serviceMode, logToFile, noSleepActive: awake.active, sessionSource: 'paired', allowAutoRepair: false });
+        } else if (!serviceMode || !(error instanceof EnrollmentEnded)) {
+          throw error;
+        } else {
+          console.error(error.message);
+        }
+      } finally {
+        awake.stop();
       }
-      finally { awake.stop(); }
     } finally {
       try {
         if (temporary && auth) await revokeIdentity(cfg, auth);

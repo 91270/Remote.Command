@@ -64,6 +64,7 @@ export const syncReply = z.strictObject({
   cancel: z.array(uuid).max(8),
   ack: z.array(uuid).max(8),
   approvalMode: z.enum(approvalModes).optional(),
+  capabilities: z.array(z.enum(capabilities)).min(1).max(3).optional(),
   deviceName: z.string().max(128).optional(),
   userEmail: z.string().max(256).optional()
 });

@@ -281,7 +281,8 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   border-color: var(--accent);
   background: var(--accent-soft);
 }
-.cap-option input[type="checkbox"] {
+.cap-option input[type="checkbox"],
+.cap-option input[type="radio"] {
   width: 16px;
   height: 16px;
   margin: 0;
@@ -315,9 +316,9 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   background: var(--amber-soft);
   color: var(--amber);
 }
-.cap-badge.readonly {
-  background: var(--green-soft);
-  color: var(--green);
+.cap-badge.recommended {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .error { color: var(--red); font-size: 13px; margin: 10px 0 0; }
@@ -767,6 +768,11 @@ dialog {
   box-shadow: var(--shadow-lg);
 }
 dialog.wide-dialog { max-width: 680px; }
+dialog.pairing-dialog { max-width: 500px; padding: 22px 24px; }
+.pairing-dialog .code-field-head { margin: 10px 0 8px; }
+.pairing-dialog .code-slots input.code-slot { height: 40px; font-size: 16px; }
+.pairing-dialog .cap-group { margin: 12px 0 6px; }
+.pairing-dialog .dialog-actions { margin-top: 16px; padding-top: 14px; }
 dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); }
 
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
@@ -837,8 +843,8 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); 
 .input-row { display: flex; align-items: stretch; gap: 10px; }
 .input-row input { flex: 1; min-width: 0; }
 .pairing-preview {
-  margin: 16px 0 4px;
-  padding: 13px 15px;
+  margin: 14px 0 12px;
+  padding: 11px 14px;
   border-radius: 14px;
   background: var(--bg);
   border: 1px solid var(--border);

@@ -695,14 +695,32 @@ test('dashboard sets approvalMode at invite/pairing time and switches it live pe
     assert.equal(store.sync(paired.id, boot, 'linux', []).approvalMode, 'client');
     assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'client');
 
+    // Unified device policy endpoint switches capabilities + approvalMode live on fast path too
+    assert.equal((await asAlice(`/api/devices/${paired.id}/policy`, { capabilities: ['read', 'read'], approvalMode: 'client' })).status, 400);
+    const readonlyPolicy = await asAlice(`/api/devices/${paired.id}/policy`, { capabilities: ['read'], approvalMode: 'client' });
+    assert.equal(readonlyPolicy.status, 200);
+    assert.deepEqual(await readonlyPolicy.json(), { ok: true, capabilities: ['read'], approvalMode: 'client' });
+    const fastSyncReadonly = store.sync(paired.id, boot, 'linux', []);
+    assert.deepEqual(fastSyncReadonly.capabilities, ['read']);
+    assert.equal(fastSyncReadonly.approvalMode, 'client');
+
+    const safePolicy = await asAlice(`/api/devices/${paired.id}/policy`, { capabilities: ['read', 'write', 'exec'], approvalMode: 'exec-only' });
+    assert.equal(safePolicy.status, 200);
+    const fastSyncSafe = store.sync(paired.id, boot, 'linux', []);
+    assert.deepEqual(fastSyncSafe.capabilities, ['read', 'write', 'exec']);
+    assert.equal(fastSyncSafe.approvalMode, 'exec-only');
+
     // Tenant isolation and revoked devices
     assert.equal((await asBob(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'strict' })).status, 404);
-    assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'client');
+    assert.equal((await asBob(`/api/devices/${paired.id}/policy`, { capabilities: ['read'], approvalMode: 'client' })).status, 404);
+    assert.equal(store.devices(alice.id).find(d => d.id === paired.id).approvalMode, 'exec-only');
     store.revoke(paired.id, alice.id);
     assert.equal((await asAlice(`/api/devices/${paired.id}/approval-mode`, { approvalMode: 'strict' })).status, 404);
+    assert.equal((await asAlice(`/api/devices/${paired.id}/policy`, { capabilities: ['read'], approvalMode: 'client' })).status, 404);
 
     const audit = await (await asAlice('/api/audit')).json();
     assert.equal(audit.records.some(r => r.event === 'device_approval_mode_updated' && r.details.approvalMode === 'client'), true);
+    assert.equal(audit.records.some(r => r.event === 'device_policy_updated' && r.details.approvalMode === 'exec-only'), true);
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();
