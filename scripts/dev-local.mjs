@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,6 +86,7 @@ async function installTunnel(force = false) {
 
   console.log(`正在下载安装 cloudflared (${label}) 到 ${destPath} ...`);
   const tmpDir = mkdtempSync(join(tmpdir(), 'rcm-cloudflared-'));
+  const stagedPath = join(installBinDir, `.${binName}.tmp.${process.pid}.${Date.now()}`);
   try {
     const res = await fetch(downloadUrl, { redirect: 'follow', signal: AbortSignal.timeout(120_000) });
     if (!res.ok) {
@@ -100,17 +102,23 @@ async function installTunnel(force = false) {
       if (extract.status !== 0) {
         throw new Error('解压 cloudflared 压缩包失败。');
       }
-      copyFileSync(join(tmpDir, 'cloudflared'), destPath);
+      copyFileSync(join(tmpDir, 'cloudflared'), stagedPath);
     } else {
       const rawPath = join(tmpDir, binName);
       writeFileSync(rawPath, payload);
-      copyFileSync(rawPath, destPath);
+      copyFileSync(rawPath, stagedPath);
     }
 
     if (!isWin) {
-      chmodSync(destPath, 0o755);
+      chmodSync(stagedPath, 0o755);
     }
+    renameSync(stagedPath, destPath);
   } finally {
+    try {
+      if (existsSync(stagedPath)) unlinkSync(stagedPath);
+    } catch {
+      // ignore cleanup errors
+    }
     rmSync(tmpDir, { recursive: true, force: true });
   }
 
@@ -199,7 +207,99 @@ function buildGatewayEnv(env) {
   delete next.CLOUDFLARED_TUNNEL_TOKEN;
   delete next.CLOUDFLARED_TUNNEL_NAME;
   delete next.TUNNEL_TOKEN;
+  delete next.TUNNEL_TRANSPORT_PROTOCOL;
   return next;
+}
+
+function buildTunnelEnv(env) {
+  const next = { ...env, TUNNEL_TOKEN: env.CLOUDFLARED_TUNNEL_TOKEN };
+  delete next.CLOUDFLARED_TUNNEL_TOKEN;
+  delete next.GOOGLE_CLIENT_ID;
+  delete next.GOOGLE_CLIENT_SECRET;
+  return next;
+}
+
+function findListeningProcesses(port) {
+  if (isWin) {
+    const script = [
+      `$pids = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`,
+      `if ($pids) { Get-CimInstance Win32_Process | Where-Object { $pids -contains $_.ProcessId } | ForEach-Object { "$($_.ProcessId)\t$($_.CommandLine)" } }`
+    ].join('; ');
+    const res = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8', windowsHide: true });
+    if (res.error || res.status !== 0) return [];
+    const items = [];
+    for (const line of (res.stdout ?? '').split(/\r?\n/)) {
+      const tab = line.indexOf('\t');
+      if (tab <= 0) continue;
+      const pid = Number(line.slice(0, tab).trim());
+      if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) {
+        items.push({ pid, command: line.slice(tab + 1).trim() });
+      }
+    }
+    return items;
+  }
+
+  const lsof = spawnSync('lsof', ['-nP', `-tiTCP:${port}`, '-sTCP:LISTEN'], { encoding: 'utf8' });
+  if (lsof.error) return [];
+  const pids = [...new Set(
+    (lsof.stdout ?? '')
+      .split(/\r?\n/)
+      .map(s => Number(s.trim()))
+      .filter(pid => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
+  )];
+  return pids.map(pid => {
+    const ps = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+    return { pid, command: (ps.stdout ?? '').trim() };
+  });
+}
+
+function isStaleRepoGateway(command, gatewayEntry) {
+  if (!command) return false;
+  const normCmd = command.replaceAll('\\', '/').toLowerCase();
+  const normEntry = resolve(gatewayEntry).replaceAll('\\', '/').toLowerCase();
+  return normCmd.includes(normEntry);
+}
+
+async function cleanupStaleGatewayPort(port, gatewayEntry) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`无效的 PORT 配置: ${port}`);
+  }
+  const listeners = findListeningProcesses(port);
+  if (listeners.length === 0) return;
+
+  const unrelated = listeners.filter(item => !isStaleRepoGateway(item.command, gatewayEntry));
+  if (unrelated.length > 0) {
+    const detail = unrelated
+      .map(item => `PID ${item.pid}: ${(item.command || '(unknown)').slice(0, 140)}`)
+      .join('\n  ');
+    throw new Error(
+      `端口 ${port} 已被其他进程占用，请先手动停止该进程或在 state/local-test.env 中修改 PORT:\n  ${detail}`
+    );
+  }
+
+  const pids = listeners.map(item => item.pid);
+  console.log(`检测到旧的本地 Gateway 进程占用端口 ${port} (PID: ${pids.join(', ')})，正在自动停止...`);
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already exited */ }
+  }
+
+  const deadline = Date.now() + 4000;
+  let forceKilled = false;
+  while (Date.now() < deadline) {
+    await delay(150);
+    const remaining = findListeningProcesses(port);
+    if (remaining.length === 0) {
+      console.log(`端口 ${port} 已释放。`);
+      return;
+    }
+    if (!forceKilled && !isWin && deadline - Date.now() <= 1500) {
+      forceKilled = true;
+      for (const item of remaining) {
+        try { process.kill(item.pid, 'SIGKILL'); } catch { /* already exited */ }
+      }
+    }
+  }
+  throw new Error(`无法释放端口 ${port}，请检查残留进程 (PID: ${pids.join(', ')})。`);
 }
 
 function terminateChild(child) {
@@ -214,7 +314,7 @@ function terminateChild(child) {
 function waitChild(child) {
   return new Promise(resolvePromise => {
     child.once('error', err => resolvePromise({ code: 1, error: err }));
-    child.once('exit', (code, signal) => resolvePromise({ code: code ?? (signal ? 0 : 1), signal }));
+    child.once('exit', (code, signal) => resolvePromise({ code: code ?? 1, signal }));
   });
 }
 
@@ -234,7 +334,7 @@ async function runSingle(cmd, args, options) {
 }
 
 async function runAll(cloudflaredBin, gatewayEntry, env) {
-  const tunnelEnv = { ...env, TUNNEL_TOKEN: env.CLOUDFLARED_TUNNEL_TOKEN };
+  const tunnelEnv = buildTunnelEnv(env);
   const gatewayEnv = buildGatewayEnv(env);
   const tunnelChild = spawn(cloudflaredBin, ['tunnel', 'run'], {
     cwd: rootDir,
@@ -267,7 +367,8 @@ async function runAll(cloudflaredBin, gatewayEntry, env) {
       waitChild(gatewayChild).then(res => ({ name: 'Gateway', ...res }))
     ]);
     if (!shuttingDown) {
-      console.error(`${first.name} 已退出 (code=${first.code})，正在停止另一进程...`);
+      const reason = first.signal ? `signal=${first.signal}` : `code=${first.code}`;
+      console.error(`${first.name} 已退出 (${reason})，正在停止另一进程...`);
       stopAll();
     }
     await Promise.allSettled([waitChild(tunnelChild), waitChild(gatewayChild)]);
@@ -321,13 +422,14 @@ async function main() {
     console.log('正在启动 Cloudflare Tunnel...');
     return runSingle(cloudflaredBin, ['tunnel', 'run'], {
       cwd: rootDir,
-      env: { ...env, TUNNEL_TOKEN: env.CLOUDFLARED_TUNNEL_TOKEN }
+      env: buildTunnelEnv(env)
     });
   }
 
   if (mode === 'gateway') {
     validateGatewayEnv(env);
     const gatewayEntry = ensureBuild(env);
+    await cleanupStaleGatewayPort(Number(env.PORT || '8787'), gatewayEntry);
     console.log(`正在启动本地 Gateway (${env.PUBLIC_ORIGIN} -> ${env.BIND_HOST || '127.0.0.1'}:${env.PORT || '8787'})...`);
     return runSingle(process.execPath, [gatewayEntry], {
       cwd: rootDir,
@@ -339,6 +441,7 @@ async function main() {
   validateGatewayEnv(env);
   const cloudflaredBin = await installTunnel(false);
   const gatewayEntry = ensureBuild(env);
+  await cleanupStaleGatewayPort(Number(env.PORT || '8787'), gatewayEntry);
   return runAll(cloudflaredBin, gatewayEntry, env);
 }
 
