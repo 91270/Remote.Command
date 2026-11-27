@@ -125,9 +125,30 @@ test('unsupported stored tasks never block current Agent work or erase completed
     store.db.prepare("UPDATE tasks SET status='dispatched',boot=? WHERE id=?").run(boot, dispatched.id);
 
     const reply = syncReply.parse(store.sync(device, boot, 'linux', []));
+    assert.equal(reply.deviceName, 'fixture');
     assert.deepEqual(reply.jobs.map(job => job.id), [current.id]);
     assert.equal(store.task(queued.id).status, 'interrupted');
     assert.equal(store.task(dispatched.id).status, 'interrupted');
     assert.equal(store.task(completed.id).output, 'retained');
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('sync includes deviceName and owner userEmail on non-fast-path responses', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-sync-meta-'));
+  const store = new Store(join(folder, 'gateway.sqlite'));
+  try {
+    const created = store.createGoogleUser({
+      sub: 'sub-sync-meta',
+      email: 'owner@example.com',
+      displayName: 'Owner',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(created.status, 'ok');
+    const device = store.pair(store.invite('macbook-pro', ['read', 'exec'], created.user.id), secret(), created.user.id).id;
+    const boot = randomUUID();
+    const reply = syncReply.parse(store.sync(device, boot, 'darwin', []));
+    assert.equal(reply.deviceName, 'macbook-pro');
+    assert.equal(reply.userEmail, 'owner@example.com');
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

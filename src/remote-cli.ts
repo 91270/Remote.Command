@@ -18,6 +18,8 @@ const help = `Usage: remote-command remote [options]
   --report              Save a local diagnostics ZIP and exit.
   --no-persist-session  Pair for this run without saving credentials.
   --disable-no-sleep    Disable macOS keep-awake mode.
+  -v, --verbose         Show expanded tool arguments and output previews.
+  --log-file            Write plain-text rotating logs under <stateDir>/logs.
   --debug               Print executor recovery details.
   --no-browser          Print the pairing URL without opening a browser.
   --gateway URL         Preset the self-hosted Gateway HTTPS URL on first run.
@@ -35,6 +37,8 @@ const options = {
   report: { type: 'boolean' },
   'no-persist-session': { type: 'boolean' },
   'disable-no-sleep': { type: 'boolean' },
+  verbose: { type: 'boolean', short: 'v' },
+  'log-file': { type: 'boolean' },
   debug: { type: 'boolean' },
   'no-browser': { type: 'boolean' },
   gateway: { type: 'string' },
@@ -110,7 +114,7 @@ async function main() {
       yes: values.yes
     });
   }
-  const flags = ['no-persist-session', 'disable-no-sleep', 'debug', 'no-browser'] as const;
+  const flags = ['no-persist-session', 'disable-no-sleep', 'verbose', 'log-file', 'debug', 'no-browser'] as const;
   await runAgentCli([maintenance, file, ...flags.filter(flag => values[flag]).map(flag => '--' + flag)]);
 }
 

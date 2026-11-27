@@ -9,8 +9,8 @@ const releaseDir = process.argv[2] ? resolve(process.argv[2]) : join(root, 'rele
 const source = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
 const stage = await mkdtemp(join(tmpdir(), 'rcm-package-'));
-const runtime = ['agent', 'agent-config', 'agent-service', 'client-commands', 'client-events',
-  'dc-core', 'protocol', 'remote-cli', 'workspace'];
+const runtime = ['agent', 'agent-config', 'agent-service', 'agent-ui', 'client-commands', 'client-events',
+  'dc-core', 'logger', 'protocol', 'remote-cli', 'workspace'];
 const json = value => JSON.stringify(value, null, 2) + '\n';
 
 try {

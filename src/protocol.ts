@@ -59,7 +59,14 @@ export type Update = z.infer<typeof update>;
 export const work = z.strictObject({ id: uuid, op: z.enum(names as [Op, ...Op[]]), args: z.record(z.string(), z.unknown()) });
 export type Work = z.infer<typeof work>;
 export const sync = z.strictObject({ boot: uuid, platform: z.enum(['darwin', 'win32', 'linux']), updates: z.array(update).max(8), catalog: catalog.optional(), ready: z.boolean().optional() });
-export const syncReply = z.strictObject({ jobs: z.array(work).max(8), cancel: z.array(uuid).max(8), ack: z.array(uuid).max(8), approvalMode: z.enum(approvalModes).optional() });
+export const syncReply = z.strictObject({
+  jobs: z.array(work).max(8),
+  cancel: z.array(uuid).max(8),
+  ack: z.array(uuid).max(8),
+  approvalMode: z.enum(approvalModes).optional(),
+  deviceName: z.string().max(128).optional(),
+  userEmail: z.string().max(256).optional()
+});
 export const maxBody = 40 * 1024 * 1024;
 export const maxActive = 4;
 export const maxWaiting = 64;

@@ -872,8 +872,15 @@ export class Store {
         }
       }
       const approvalMode = normalizeApprovalMode(dev.approval_mode);
+      const ownerRow = dev.user_id
+        ? (this.db.prepare('SELECT email FROM users WHERE id=?').get(dev.user_id) as { email?: string | null } | undefined)
+        : undefined;
+      const deviceMeta = {
+        ...(dev.name ? { deviceName: String(dev.name).slice(0, 128) } : {}),
+        ...(ownerRow?.email ? { userEmail: String(ownerRow.email).slice(0, 256) } : {})
+      };
       const active = this.db.prepare(`SELECT * FROM tasks WHERE device=? AND status IN ${liveSql} ORDER BY created`).all(device) as TaskRow[];
-      if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack, approvalMode };
+      if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack, approvalMode, ...deviceMeta };
       const pending = this.db.prepare("SELECT * FROM tasks WHERE device=? AND status='queued' AND deadline>? ORDER BY created LIMIT ?")
         .all(device, now, Math.max(0, maxActive - active.length)) as TaskRow[];
       for (const t of pending) {
@@ -881,7 +888,7 @@ export class Store {
         this.audit('task_dispatched', { id: t.id, device }, t.user_id);
       }
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));
-      return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack, approvalMode };
+      return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack, approvalMode, ...deviceMeta };
     });
   }
 

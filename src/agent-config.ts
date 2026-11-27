@@ -11,6 +11,7 @@ const config = z.strictObject({
   gateway: z.string(), workspace: z.string().refine(isAbsolute), stateDir: z.string().refine(isAbsolute),
   allowInsecureLoopback: z.boolean().default(false), capabilities: z.array(z.enum(capabilities)).min(1).max(3).default(['read']),
   noSleep: z.boolean().default(true),
+  logToFile: z.boolean().default(false),
   chromePath: z.string().refine(isAbsolute).optional(),
   ripgrep: z.string().refine(isAbsolute).optional()
 });

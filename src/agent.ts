@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { realpathSync, existsSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile, unlink, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
@@ -10,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig, type AgentConfig } from './agent-config.js';
+import { createAgentUi, formatDuration } from './agent-ui.js';
 import { agentClientId, approvalMs, capability, catalog, coreResult, clip, errorText, hash, maxActive, needsLocalApproval, operations, projectVersion, secret, syncReply, terminal, uuid, work, type ApprovalMode, type Update, type Work, type Catalog } from './protocol.js';
 import { programEnv } from './workspace.js';
 import { clientEvents } from './client-events.js';
@@ -71,9 +73,31 @@ function summarizeJob(job: Work): string {
   return `${job.op} ${JSON.stringify(job.args).slice(0, 220)}`;
 }
 
-async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, serviceMode = false) {
+type RunOptions = {
+  debug: boolean;
+  verbose: boolean;
+  serviceMode: boolean;
+  logToFile: boolean;
+  noSleepActive: boolean;
+  sessionSource: 'persisted' | 'paired' | 'temporary';
+};
+
+async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
   if (process.platform !== 'darwin' && process.platform !== 'win32' && process.platform !== 'linux') throw new Error('Unsupported platform.');
   if (auth.origin !== cfg.origin) throw new Error('The pairing is bound to another Gateway.');
+  const logDir = opts.logToFile ? join(cfg.stateDir, 'logs') : undefined;
+  const ui = createAgentUi({ verbose: opts.verbose, debug: opts.debug, serviceMode: opts.serviceMode, logDir });
+  ui.banner();
+  ui.debug(`Verbose mode: ${opts.verbose}, Debug mode: ${opts.debug}`);
+  if (opts.noSleepActive) ui.info('☕ No sleep mode enabled (macOS caffeinate)');
+  else if (process.platform === 'darwin') ui.info('💤 No sleep mode disabled');
+  ui.info('🚀 Starting Remote.Command Agent...');
+  ui.substep('⏳ Connecting to local Desktop Commander core...');
+  if (opts.sessionSource === 'persisted') ui.info(`💾 Found persisted session for device ${auth.id}`);
+  else if (opts.sessionSource === 'temporary') ui.info(`🧪 Using temporary session for device ${auth.id}`);
+  else ui.info(`🔐 Paired new session for device ${auth.id}`);
+  ui.info(`⏳ Connecting to Remote Gateway ${cfg.origin}`);
+
   const events = clientEvents(cfg.stateDir);
   events.record({ event: 'starting' });
   const boot = randomUUID(), shutdown = new AbortController();
@@ -86,6 +110,12 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
   let executorRecovery: Promise<void> | undefined;
   let promptChain: Promise<void> = Promise.resolve();
   let approvalMode: ApprovalMode = 'client';
+  let deviceName = hostname().slice(0, 128) || 'Remote Command Agent';
+  let userEmail: string | undefined;
+  let hadCoreReady = false;
+  let hasPrintedReady = false;
+  let offlineSince = 0;
+  let unreachableAttempts = 0;
   type Active = { state: Update; abort: AbortController; finished?: Promise<void> };
   const jobs = new Map<string, Active>();
   let dcClient: Client | undefined;
@@ -101,7 +131,10 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
         dcClient = undefined;
         dcCatalog = undefined;
         catalogSynced = false;
-        if (!shutdown.signal.aborted) events.record({ event: 'core_disconnected' });
+        if (!shutdown.signal.aborted) {
+          events.record({ event: 'core_disconnected' });
+          ui.coreDisconnected();
+        }
       };
       const coreState = join(cfg.stateDir, 'core');
       const transport = new StdioClientTransport({
@@ -124,6 +157,12 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
         dcClient = c;
         catalogSynced = false;
         events.record({ event: 'core_ready', pid: transport.pid ?? undefined });
+        if (!hadCoreReady) {
+          hadCoreReady = true;
+          ui.substep(`🔌 Connected to local core (${dcCatalog.tools.length} tools ready)`);
+        } else {
+          ui.coreRecovered(dcCatalog.tools.length);
+        }
         return c;
       } catch (e) { await transport.close(); throw e; }
     })().finally(() => { dcConnecting = undefined; });
@@ -137,7 +176,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
     }, () => {
       retryExecutorAt = Date.now() + Math.min(5000, 500 * 2 ** Math.min(4, executorFailures++));
       events.record({ event: 'core_retry' });
-      if (debug) console.error('Local MCP failed readiness checks. Retry delay:', retryExecutorAt - Date.now(), 'ms');
+      ui.debug(`Local core readiness check failed; retrying in ${formatDuration(retryExecutorAt - Date.now())}`);
     }).finally(() => { executorRecovery = undefined; });
   }
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => shutdown.abort());
@@ -148,7 +187,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
     decisionFile: string,
     jobSignal: AbortSignal
   ): () => void {
-    if (serviceMode || !process.stdin.isTTY || !process.stdout.isTTY) return () => {};
+    if (opts.serviceMode || !process.stdin.isTTY || !process.stdout.isTTY) return () => {};
     const promptAbort = new AbortController();
     const stop = () => promptAbort.abort();
     jobSignal.addEventListener('abort', stop, { once: true });
@@ -160,13 +199,13 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
       const onAbort = () => rl.close();
       promptAbort.signal.addEventListener('abort', onAbort, { once: true });
       try {
-        console.log(`\n[本机审批] 请求操作: ${summarizeJob(job)}`);
-        const answer = (await rl.question('批准此操作？输入 y 批准 / n 拒绝 [y/N]: ', { signal: promptAbort.signal })).trim().toLowerCase();
+        ui.approvalPromptHeader(summarizeJob(job));
+        const answer = (await rl.question('Approve this operation? Type y to approve / n to deny [y/N]: ', { signal: promptAbort.signal })).trim().toLowerCase();
         const decision = answer === 'y' || answer === 'yes' ? 'approve' : 'deny';
         await writeFile(decisionFile, JSON.stringify({ decision, digest: hash(request) }), { flag: 'wx', mode: 0o600 }).catch(err => {
           if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
         });
-        console.log(decision === 'approve' ? '[本机审批] 已批准并提交执行。' : '[本机审批] 已拒绝此操作。');
+        ui.approvalDecision(decision === 'approve');
       } catch {
         // Aborted by expiry, cancellation, shutdown, or external CLI decide
       } finally {
@@ -186,6 +225,10 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
     const active: Active = { state: { id: job.id, status: 'running', seq: 1 }, abort: new AbortController() };
     jobs.set(job.id, active);
     if (cancel) active.abort.abort();
+    const startedAt = Date.now();
+    const toolName = job.op === 'dc_call' ? String(job.args.tool ?? 'dc_call') : job.op;
+    const toolArgs = job.op === 'dc_call' ? (job.args.arguments ?? {}) : job.args;
+    ui.toolReceived(job.id, toolName, toolArgs);
     const state = (status: Update['status'], output?: string) => {
       if (active.state.status !== status || active.state.output !== output)
         active.state = { id: job.id, status, seq: active.state.seq + 1, output };
@@ -204,6 +247,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
           const pending = filename(cfg, job.id, 'pending'), decision = filename(cfg, job.id, 'decision');
           await writeFile(pending, request, { flag: 'wx', mode: 0o600 });
           state('awaiting_approval', 'Confirm on the device (press y/n in the Agent terminal or use the Agent CLI). Approval expires after five minutes.');
+          ui.toolAwaitingApproval(job.id, toolName);
           const cancelPrompt = enqueueForegroundApproval(job, request, pending, decision, signal);
           try {
             for (;;) {
@@ -255,6 +299,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
         state(cancelled ? (effective === 'write' && active.state.status === 'running' ? 'interrupted' : 'cancelled') : 'failed',
           cancelled ? 'Cancellation received. If a write had already begun, check the workspace before retrying.' : clip(errorText(e)));
       } finally {
+        ui.toolFinished(job.id, toolName, active.state.status, Date.now() - startedAt, active.state.output);
         completed++;
         wakeSync?.abort();
       }
@@ -270,15 +315,18 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
     if (response.status === 401 || response.status === 409) {
       const err = new EnrollmentEnded('Agent pairing was revoked or replaced; stop and check device enrollment.');
       events.record({ event: 'pairing_revoked' });
+      ui.error('⚠️ Agent pairing was revoked or replaced; stopping.');
       shutdown.abort(err);
       throw err;
     }
     if (!response.ok) throw new Error(`Gateway sync HTTP ${response.status}`);
     const reply = syncReply.parse(await response.json());
     lastSync = Date.now();
+    if (reply.deviceName) deviceName = reply.deviceName;
+    if (reply.userEmail) userEmail = reply.userEmail;
     if (reply.approvalMode && reply.approvalMode !== approvalMode) {
       approvalMode = reply.approvalMode;
-      console.log(`[审批策略] 已同步为: ${approvalMode}`);
+      if (hasPrintedReady) ui.approvalModeChanged(approvalMode);
     }
     if (catalogToSend && catalogToSend === dcCatalog) catalogSynced = true;
     if (disconnectTask && reply.ack.includes(disconnectTask)) shutdown.abort();
@@ -301,9 +349,31 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
         synced = true;
         if (ready && !connected) {
           events.record({ event: 'gateway_online' });
-          console.log('Agent online:', auth.id);
+          if (!hasPrintedReady) {
+            hasPrintedReady = true;
+            if (opts.sessionSource === 'persisted') ui.substep('✅ Session restored');
+            ui.info('🔌 Device marked as online');
+            ui.ready({
+              userEmail,
+              deviceId: auth.id,
+              deviceName,
+              gateway: cfg.origin,
+              workspace: cfg.workspace,
+              capabilities: cfg.capabilities,
+              approvalMode,
+              version: projectVersion,
+              logDir,
+              coreToolsCount: dcCatalog?.tools.length
+            });
+          } else if (offlineSince > 0) {
+            ui.gatewayReconnected(Date.now() - offlineSince);
+          } else {
+            ui.info('🔌 Device is back online.');
+          }
+          offlineSince = 0;
+          unreachableAttempts = 0;
         } else if (!ready && connected && !disconnectTask) {
-          console.error('Local MCP is unavailable. Restarting the executor.');
+          ui.warn('⚠️ Local Desktop Commander core is unavailable; restarting the executor...');
         }
         connected = ready;
         disconnectedNotice = false;
@@ -311,13 +381,15 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
       } catch (e) {
         if (shutdown.signal.aborted) throw e;
         lastSync = 0;
+        unreachableAttempts++;
         if (!disconnectedNotice) {
           events.record({ event: 'gateway_unreachable' });
-          console.error('Gateway unreachable; retrying.');
+          offlineSince = Date.now();
           disconnectedNotice = true;
         }
         connected = false;
         retry = Math.min(7000, retry * 2);
+        ui.gatewayUnreachable(errorText(e), retry, unreachableAttempts);
       }
       // Keep one sync in flight. A completion during its request still needs another sync.
       if (synced && completed !== sentCompletion) continue;
@@ -327,6 +399,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
       wakeSync = undefined;
     }
   } finally {
+    ui.disconnecting(disconnectTask ? 'remote disconnect requested' : undefined);
     for (const job of jobs.values()) job.abort.abort();
     await Promise.allSettled([...jobs.values()].map(j => j.finished));
     await executorRecovery;
@@ -334,15 +407,18 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, debug: boolean, servi
     await fetchJson(cfg, '/device/offline', { boot }, auth.credential).catch(() => {});
     events.record({ event: 'stopped' });
     await events.flush();
+    ui.disconnected();
   }
 }
-const help = `Usage: agent connect|run|login|pair|logout|report|status|approvals CONFIG
-       agent decide CONFIG TASK approve|deny
+const help = `Usage: remote-command agent connect|run|login|pair|logout|report|status|approvals CONFIG
+       remote-command agent decide CONFIG TASK approve|deny
 
 connect pairs in a browser when no local identity exists and then starts the Agent.
   --no-browser            Print the pairing URL without opening a browser.
   --no-persist-session    Pair for this run without saving credentials.
   --disable-no-sleep      Disable macOS keep-awake.
+  -v, --verbose           Show expanded tool arguments and output previews.
+  --log-file              Write plain-text rotating logs under <stateDir>/logs.
   --debug                 Show executor recovery details.`;
 class EnrollmentEnded extends Error {}
 export async function runAgentCli(argv: string[]) {
@@ -357,26 +433,36 @@ export async function runAgentCli(argv: string[]) {
     if (temporary && cmd !== 'connect') throw new Error('Use connect for --no-persist-session.');
     const release = await agentLock(cfg);
     let auth: DeviceIdentity | undefined;
+    let sessionSource: 'persisted' | 'paired' | 'temporary' = 'persisted';
     try {
       if (temporary) {
+        sessionSource = 'temporary';
         auth = await deviceLogin(cfg, !args.includes('--no-browser'), false);
       } else {
         const raw = await readFile(identityFile(cfg), 'utf8').catch((error: NodeJS.ErrnoException) => {
           if (error.code === 'ENOENT') return '';
           throw error;
         });
-        if (raw) auth = identity.parse(JSON.parse(raw));
-        else if (cmd === 'connect') auth = await deviceLogin(cfg, !args.includes('--no-browser'));
-        else if (args.includes('--service')) { console.error('Pair the device before starting the background Agent.'); return; }
+        if (raw) {
+          sessionSource = 'persisted';
+          auth = identity.parse(JSON.parse(raw));
+        } else if (cmd === 'connect') {
+          sessionSource = 'paired';
+          auth = await deviceLogin(cfg, !args.includes('--no-browser'));
+        } else if (args.includes('--service')) { console.error('Pair the device before starting the background Agent.'); return; }
         else throw new Error('No device identity. Run connect or pair first.');
       }
-      const stopAwake = keepAwake(cfg.noSleep && !args.includes('--disable-no-sleep'));
-      try { await run(cfg, auth, args.includes('--debug'), args.includes('--service')); }
+      const awake = keepAwake(cfg.noSleep && !args.includes('--disable-no-sleep'));
+      const debug = args.includes('--debug');
+      const verbose = args.includes('--verbose') || args.includes('-v');
+      const serviceMode = args.includes('--service');
+      const logToFile = cfg.logToFile || args.includes('--log-file');
+      try { await run(cfg, auth, { debug, verbose, serviceMode, logToFile, noSleepActive: awake.active, sessionSource }); }
       catch (error) {
-        if (!args.includes('--service') || !(error instanceof EnrollmentEnded)) throw error;
+        if (!serviceMode || !(error instanceof EnrollmentEnded)) throw error;
         console.error(error.message);
       }
-      finally { stopAwake(); }
+      finally { awake.stop(); }
     } finally {
       try {
         if (temporary && auth) await revokeIdentity(cfg, auth);

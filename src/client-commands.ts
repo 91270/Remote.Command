@@ -6,6 +6,7 @@ import { readFile, writeFile, unlink, stat, rename, mkdir } from 'node:fs/promis
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { agentClientId, hash, secret, uuid, errorText } from './protocol.js';
+import { formatTime } from './agent-ui.js';
 import { recentClientEvents } from './client-events.js';
 import type { AgentConfig } from './agent-config.js';
 
@@ -62,8 +63,8 @@ async function browserEnrollment(cfg: AgentConfig, browser: boolean): Promise<De
     expires_in: z.number().positive().max(600), interval: z.number().positive().max(30) }).parse(await response.json());
   const url = new URL(offer.verification_uri_complete);
   if (url.origin !== cfg.origin || url.pathname !== '/manage') throw new Error('Unexpected verification origin.');
-  console.log('Pair this device in your browser:', url.href);
-  console.log('Verify the device code:', offer.user_code);
+  console.log(`[${formatTime()}] 🔗 Pair this device in your browser: ${url.href}`);
+  console.log(`[${formatTime()}] 🔑 Verify the device code: ${offer.user_code}`);
   if (browser) openBrowser(url.href);
   const deadline = performance.now() + offer.expires_in * 1000;
   let interval = offer.interval * 1000;
@@ -80,7 +81,7 @@ async function browserEnrollment(cfg: AgentConfig, browser: boolean): Promise<De
     if (!payload) continue;
     if (result.ok) {
       const accepted = z.object({ device_id: uuid }).parse(payload);
-      console.log('Paired device:', accepted.device_id);
+      console.log(`[${formatTime()}] ✅ Paired device: ${accepted.device_id}`);
       return { origin: cfg.origin, id: accepted.device_id, credential };
     }
     if (payload.error === 'slow_down') { interval = Math.min(30000, interval + 1000); continue; }
@@ -171,9 +172,9 @@ export async function agentLock(cfg: AgentConfig) {
   return await lock.default.lock(cfg.stateDir, { realpath: true, stale: 20000, update: 5000, retries: 0,
     onCompromised(error: Error) { console.error(errorText(error)); process.kill(process.pid, 'SIGTERM'); } }) as (() => Promise<void>);
 }
-export function keepAwake(enabled: boolean) {
-  if (!enabled || process.platform !== 'darwin') return () => {};
+export function keepAwake(enabled: boolean): { active: boolean; stop: () => void } {
+  if (!enabled || process.platform !== 'darwin') return { active: false, stop: () => {} };
   const child = spawn('/usr/bin/caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' });
   child.on('error', () => console.error('Could not activate macOS keep-awake mode.'));
-  return () => { child.kill('SIGTERM'); };
+  return { active: true, stop: () => { child.kill('SIGTERM'); } };
 }
