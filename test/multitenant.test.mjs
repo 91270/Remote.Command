@@ -18,7 +18,7 @@ test('Store initializes schema_version=1 cleanly without password_hash and enfor
     const store = new Store(file);
     try {
       const version = store.db.prepare('PRAGMA user_version').get().user_version;
-      assert.equal(version, 2);
+      assert.equal(version, 3);
       const userCols = store.db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
       assert.equal(userCols.includes('password_hash'), false);
       const created = store.createGoogleUser({

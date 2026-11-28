@@ -6,7 +6,7 @@ import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, c
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const liveSql = "('dispatched','awaiting_approval','running')";
 const outstandingSql = "('queued','dispatched','awaiting_approval','running')";
 const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interrupted')";
@@ -37,6 +37,7 @@ type TaskRow = {
   id: string; user_id: string | null; device: string; op: Op; args: string; status: string; boot: string | null;
   created: number; changed: number; deadline: number; cancel: number; output: string | null; seq: number;
   mcp_result: string | null; tool_name: string | null; duration_ms?: number | null;
+  payload_purged?: number | null; payload_purged_at?: number | null;
 };
 export type MonthlySoftQuotaStatus = {
   limit: number;
@@ -228,6 +229,8 @@ export class Store {
       this.ensureColumn('tasks', 'background', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tasks', 'user_id', 'TEXT');
       this.ensureColumn('tasks', 'duration_ms', 'INTEGER');
+      this.ensureColumn('tasks', 'payload_purged', 'INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('tasks', 'payload_purged_at', 'INTEGER');
 
       if (this.ensureColumn('devices', 'last_seen', 'INTEGER')) {
         this.db.exec('UPDATE devices SET last_seen=seen WHERE seen>0');
@@ -250,6 +253,7 @@ export class Store {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id, revoked);
         CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, created DESC);
+        CREATE INDEX IF NOT EXISTS tasks_payload_purge ON tasks(payload_purged, status, changed);
         CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS usage_events_user_created ON usage_events(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS usage_events_created ON usage_events(created_at);
@@ -1022,12 +1026,16 @@ export class Store {
   }
 
   view(t: TaskRow) {
+    const payloadPurged = !!t.payload_purged;
     return {
       id: t.id, device: t.device, operation: t.op, status: t.status,
       toolName: t.tool_name ?? undefined, cancelRequested: !!t.cancel,
       createdAt: new Date(t.created).toISOString(), updatedAt: new Date(t.changed).toISOString(),
       durationMs: t.duration_ms !== undefined && t.duration_ms !== null ? Number(t.duration_ms) : null,
-      output: t.output, ...(t.mcp_result ? { result: JSON.parse(t.mcp_result) } : {})
+      payloadPurged,
+      ...(t.payload_purged_at ? { payloadPurgedAt: new Date(Number(t.payload_purged_at)).toISOString() } : {}),
+      output: payloadPurged ? null : t.output,
+      ...(!payloadPurged && t.mcp_result ? { result: JSON.parse(t.mcp_result) } : {})
     };
   }
 
@@ -1130,7 +1138,17 @@ export class Store {
     }
   }
 
-  maintain(taskDays = 7, auditDays = 90, dcrClientDays = 30, usageDays = 210) {
+  purgeExpiredPayloads(resultTtlMinutes = 30, now = Date.now()): number {
+    if (!Number.isFinite(resultTtlMinutes) || resultTtlMinutes <= 0) return 0;
+    const cutoff = now - resultTtlMinutes * 60_000;
+    const res = this.db.prepare(
+      `UPDATE tasks SET args='{}', output=NULL, mcp_result=NULL, payload_purged=1, payload_purged_at=?
+       WHERE status IN ${doneSql} AND payload_purged=0 AND changed<?`
+    ).run(now, cutoff);
+    return Number(res.changes);
+  }
+
+  maintain(taskDays = 7, auditDays = 90, dcrClientDays = 30, usageDays = 210, resultTtlMinutes = 30) {
     this.tx(() => {
       this.flushLiveSeen();
       const now = Date.now();
@@ -1139,6 +1157,7 @@ export class Store {
         this.finish(String(t.id), t.status === 'queued' ? 'timed_out' : 'interrupted',
           t.status === 'queued' ? 'Expired before dispatch.' : 'Agent result was not received. Check the device before retrying.');
       }
+      this.purgeExpiredPayloads(resultTtlMinutes, now);
       this.db.prepare(`DELETE FROM tasks WHERE status IN ${doneSql} AND changed<?`).run(now - taskDays * day);
       this.db.prepare('DELETE FROM usage_events WHERE created_at<?').run(now - Math.max(usageDays, 210) * day);
       this.db.prepare('DELETE FROM audit WHERE at<?').run(now - auditDays * day);

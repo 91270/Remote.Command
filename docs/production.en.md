@@ -195,7 +195,7 @@ Extract with `tar.exe` into a fixed directory, run `npm ci --omit=dev --ignore-s
 
 ## 6. Online Backup & Restore Drills
 
-Backups contain users, paired devices, tool outputs, and audit logs. Restrict access to administrators only and keep encrypted off-site copies alongside `.env`, `data/.owner_key`, `compose.yaml`, and Nginx configs.
+Backups contain users, paired devices, audit history, and any recent unpurged tool outputs. By default, the Gateway automatically purges completed task payloads (`args` / `output` / `mcp_result`) after **30 minutes** (`RCM_RESULT_TTL_MINUTES`), minimizing sensitive payload exposure inside snapshots. Restrict backup access to administrators only and keep encrypted off-site copies alongside `.env`, `data/.owner_key`, `compose.yaml`, and Nginx configs.
 
 ### Online Backup & Verification
 
@@ -239,7 +239,7 @@ docker compose up -d --wait gateway
 | **Health** | `/healthz` (liveness) and `/readyz` (SQLite readiness) return `200`. |
 | **HTTPS & OAuth** | Verify valid TLS certificates, `/.well-known/oauth-protected-resource/mcp` points to your HTTPS origin, and `/auth/google/start` redirects cleanly to Google. |
 | **Logs & Disk** | Run `docker compose logs --tail 100 gateway` to monitor rate-limit or upstream OIDC errors; check Nginx logs and backup disk capacity. |
-| **Retention** | Completed tasks default to **7 days** (`RCM_TASK_RETENTION_DAYS`), desensitized usage metadata (`usage_events`, excluding arguments and outputs) is retained for **210 days** to power 6-month trends, audit logs default to **90 days** (`RCM_AUDIT_RETENTION_DAYS`), and DCR clients to **30 days** (`RCM_DCR_CLIENT_TTL_DAYS`). |
+| **Retention** | Completed task payloads (`args` / `output` / `mcp_result`) default to **30 minutes** (`RCM_RESULT_TTL_MINUTES`, set `0` to disable early purge) while task metadata stays **7 days** (`RCM_TASK_RETENTION_DAYS`); desensitized usage metadata (`usage_events`, excluding arguments and outputs) is retained for **210 days** to power 6-month trends, audit logs default to **90 days** (`RCM_AUDIT_RETENTION_DAYS`), and DCR clients to **30 days** (`RCM_DCR_CLIENT_TTL_DAYS`). |
 | **Monthly Soft Quota Alert** | Optional `RCM_MONTHLY_SOFT_QUOTA` (positive integer; unset or `0` disables). When monthly usage reaches **80%**, both `/manage` and `who_am_i` emit a non-blocking soft alert without interrupting self-hosted calls. |
 | **Emergency Revoke & Diagnostics** | `/manage` supports revoking individual/all devices and OAuth sessions per user, plus disabling user accounts; Agents can export sanitized bundles with `remote --report`. |
 

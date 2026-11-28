@@ -627,3 +627,66 @@ test('RCM_MONTHLY_SOFT_QUOTA surfaces soft alert in who_am_i without blocking de
     await rm(temp, { recursive: true, force: true });
   }
 });
+
+test('RCM_RESULT_TTL_MINUTES purges expired task payloads while get_tool_result returns clear metadata notice', { timeout: 20000 }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-result-ttl-'));
+  const db = join(temp, 'gateway.sqlite');
+  const p = await port();
+  const origin = `http://127.0.0.1:${p}`;
+  const env = {
+    ...process.env,
+    STATE_DB: db,
+    PUBLIC_ORIGIN: origin,
+    ALLOW_INSECURE_LOOPBACK: '1',
+    PORT: String(p),
+    BIND_HOST: '127.0.0.1',
+    OWNER_KEY: secret(),
+    GOOGLE_CLIENT_ID: 'fixture-google-client',
+    GOOGLE_CLIENT_SECRET: 'fixture-google-secret',
+    RCM_RESULT_TTL_MINUTES: '1'
+  };
+  let gateway, client;
+  try {
+    const seedStore = new Store(db);
+    const created = seedStore.createGoogleUser({
+      sub: 'e2e-ttl-sub',
+      email: 'ttl-e2e@example.com',
+      displayName: 'TTL E2E User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(created.status, 'ok');
+    const accessToken = secret();
+    seedStore.putAuth(accessToken, 'access', 3600000, { userId: created.user.id, scope: 'remote:use' });
+    const dev = seedStore.pair(seedStore.invite('TTLBox', ['read'], created.user.id), secret());
+    seedStore.sync(dev.id, secret(), 'linux', []);
+
+    const expired = seedStore.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: '/secret/expired.txt' } }, created.user.id);
+    seedStore.finish(expired.id, 'succeeded', 'TOP_SECRET_FILE_BODY', { content: [{ type: 'text', text: 'TOP_SECRET_MCP_BODY' }] });
+    seedStore.db.prepare('UPDATE tasks SET changed=? WHERE id=?').run(Date.now() - 2 * 60_000, expired.id);
+    seedStore.db.close();
+
+    gateway = start(['dist/gateway.js'], { env });
+    await until(async () => (await fetch(origin + '/healthz')).ok);
+
+    client = new Client({ name: 'ttl-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(origin + '/mcp'), { requestInit: { headers: jwt(accessToken) } }));
+
+    const toolRes = await client.callTool({ name: 'get_tool_result', arguments: { call_id: expired.id } });
+    assert.equal(toolRes.isError, undefined);
+    const body = JSON.parse(toolRes.content[0].text);
+    assert.equal(body.call_id, expired.id);
+    assert.equal(body.status, 'succeeded');
+    assert.equal(body.toolName, 'read_file');
+    assert.equal(body.payloadPurged, true);
+    assert.ok(body.payloadPurgedAt);
+    assert.equal(body.output, null);
+    assert.equal(Object.hasOwn(body, 'result'), false);
+    assert.match(body.notice, /automatically purged/i);
+    assert.equal(JSON.stringify(body).includes('TOP_SECRET'), false);
+  } finally {
+    await client?.close();
+    await stop(gateway);
+    await rm(temp, { recursive: true, force: true });
+  }
+});

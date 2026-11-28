@@ -74,6 +74,7 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /id="usage-devices"/);
     assert.match(html, /id="usage-success-rate"/);
     assert.match(html, /id="usage-avg-duration"/);
+    assert.match(html, /id="task-purged-notice"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     const dashboardJsRes = await request('/assets/dashboard.js');
     assert.equal(dashboardJsRes.status, 200);
@@ -815,6 +816,20 @@ test('dashboard /manage/api/usage enforces tenant isolation, desensitization, an
     assert.equal(bobUsage.summary.failedCalls30d, 1);
     assert.equal(bobUsage.softQuota.status, 'ok');
     assert.deepEqual(bobUsage.deviceDistribution.map(d => d.deviceId), [devB.id]);
+
+    // Task detail endpoint reports payloadPurged cleanly after TTL purge without leaking prior output
+    store.db.prepare('UPDATE tasks SET changed=? WHERE id=?').run(Date.now() - 45 * 60_000, task4.id);
+    store.maintain(7, 90, 30, 210, 30);
+    const purgedTaskRes = await asAlice('/api/tasks/' + task4.id);
+    assert.equal(purgedTaskRes.status, 200);
+    const purgedTask = await purgedTaskRes.json();
+    assert.equal(purgedTask.id, task4.id);
+    assert.equal(purgedTask.toolName, 'write_file');
+    assert.equal(purgedTask.status, 'succeeded');
+    assert.equal(purgedTask.payloadPurged, true);
+    assert.ok(purgedTask.payloadPurgedAt);
+    assert.equal(purgedTask.output, null);
+    assert.equal(Object.hasOwn(purgedTask, 'result'), false);
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();

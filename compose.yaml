@@ -17,6 +17,8 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-}
       # 可选：月度软配额告警阈值（正整数；达到 80% 时在控制台与 who_am_i 发出非阻断提醒，留空或 0 表示关闭）
       # RCM_MONTHLY_SOFT_QUOTA: 10000
+      # 可选：终态任务正文短时保留时长（分钟，默认 30；设为 0 则跟随任务元数据 7 天清理周期）
+      # RCM_RESULT_TTL_MINUTES: 30
       # OAuth 客户端与回调地址已通过 DCR (/oauth/register) 自动发现并注册，无需手动配置
       # 如需限制额外回调域名，可按需配置 OAUTH_ALLOWED_REDIRECT_HOSTS: chatgpt.com,platform.openai.com
     volumes:

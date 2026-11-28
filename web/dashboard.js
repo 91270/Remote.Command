@@ -871,7 +871,18 @@ async function updateTask(id) {
   byId('task-meta').textContent = `${t.toolName || t.operation} · 更新于 ${formatTime(t.updatedAt)}`;
   byId('task-id').textContent = t.id;
   byId('task-approval').hidden = t.status !== 'awaiting_approval';
-  byId('task-output').textContent = t.output || (t.result ? JSON.stringify(t.result, null, 2) : '（暂无输出）');
+  const purgedNotice = byId('task-purged-notice');
+  if (purgedNotice) {
+    purgedNotice.hidden = !t.payloadPurged;
+    if (t.payloadPurged) {
+      purgedNotice.textContent = t.payloadPurgedAt
+        ? `该任务的正文（参数与输出）已按隐私短时保留策略于 ${formatTime(t.payloadPurgedAt)} 自动清理，当前仅保留脱敏元数据。`
+        : '该任务的正文（参数与输出）已按隐私短时保留策略自动清理，当前仅保留脱敏元数据。';
+    }
+  }
+  byId('task-output').textContent = t.payloadPurged
+    ? '（正文已按隐私保留策略清理，仅保留任务元数据）'
+    : (t.output || (t.result ? JSON.stringify(t.result, null, 2) : '（暂无输出）'));
   byId('cancel-task').hidden = terminalStates.has(t.status);
 }
 

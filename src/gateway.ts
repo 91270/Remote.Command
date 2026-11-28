@@ -57,9 +57,16 @@ function optionalPositiveInt(value: string | undefined, max: number, name: strin
   if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new Error(`Invalid ${name}.`);
   return n;
 }
+function resultTtl(value: string | undefined, fallback: number, max: number): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const minutes = Number(value);
+  if (!Number.isSafeInteger(minutes) || minutes < 0 || minutes > max) throw new Error('Invalid RCM_RESULT_TTL_MINUTES.');
+  return minutes;
+}
 const taskDays = retention(env.RCM_TASK_RETENTION_DAYS, 7, 365);
 const auditDays = retention(env.RCM_AUDIT_RETENTION_DAYS, 90, 3650);
 const dcrClientDays = retention(env.RCM_DCR_CLIENT_TTL_DAYS, 30, 3650);
+const resultTtlMinutes = resultTtl(env.RCM_RESULT_TTL_MINUTES, 30, 525600);
 const monthlySoftQuota = optionalPositiveInt(env.RCM_MONTHLY_SOFT_QUOTA, 10_000_000, 'RCM_MONTHLY_SOFT_QUOTA');
 const origin = endpoint(env.PUBLIC_ORIGIN ?? '', env.ALLOW_INSECURE_LOOPBACK === '1').origin;
 const bindHost = env.BIND_HOST ?? '127.0.0.1';
@@ -219,8 +226,8 @@ function mcp(accessToken: string, userId?: string) {
     if (!store.catalog(device, userId).resources.some(resource => resource.uri === params.uri)) throw new Error('Unknown device resource.');
     const submitted = store.submit(device, 'dc_resource', { uri: params.uri }, userId);
     const task = await waitForTask(submitted.id, signal);
-    if (task.status !== 'succeeded') throw new Error('Resource is not ready. Retry the resource request.');
-    return JSON.parse(JSON.parse(task.mcp_result!).content[0].text);
+    if (task.status !== 'succeeded' || !task.mcp_result) throw new Error('Resource is not ready. Retry the resource request.');
+    return JSON.parse(JSON.parse(task.mcp_result).content[0].text);
   });
   server.setRequestHandler(CallToolRequestSchema, async ({ params }, { signal }) => {
     try {
@@ -290,6 +297,13 @@ function mcp(accessToken: string, userId?: string) {
         const { call_id } = callIdArg.parse(arg);
         const task = store.task(call_id, userId);
         if (!task) throw new Error('Unknown or expired call.');
+        if (task.payload_purged) {
+          return result({
+            ...store.view(task),
+            call_id,
+            notice: 'The tool output payload was automatically purged under the short-lived relay retention policy; only task metadata is retained.'
+          });
+        }
         if (task.mcp_result) return JSON.parse(task.mcp_result);
         return result({ ...store.view(task), call_id });
       }
@@ -374,9 +388,9 @@ const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, as
     return json(res, 500, { error: 'Internal server error.' });
   }
 });
-store.maintain(taskDays, auditDays, dcrClientDays);
+store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes);
 const cleanup = setInterval(() => {
-  try { store.maintain(taskDays, auditDays, dcrClientDays); } catch { logger.error('Gateway database maintenance failed.', true); }
+  try { store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes); } catch { logger.error('Gateway database maintenance failed.', true); }
 }, 30000);
 cleanup.unref();
 server.listen(Number(env.PORT ?? 8787), bindHost, () => {
@@ -386,7 +400,7 @@ function shutdown() {
   if (draining) return;
   draining = true;
   clearInterval(cleanup);
-  store.maintain(taskDays, auditDays, dcrClientDays);
+  store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes);
   const force = setTimeout(() => server.closeAllConnections(), 20000);
   force.unref();
   server.close(() => { clearTimeout(force); store.db.close(); });

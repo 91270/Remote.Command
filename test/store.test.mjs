@@ -159,7 +159,7 @@ test('schema v1->v2 migration backfills duration_ms and desensitized usage_event
   const file = join(folder, 'gateway.sqlite');
   let store = new Store(file);
   try {
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
     const created = store.createGoogleUser({
       sub: 'sub-migrate-v2',
       email: 'migrate@example.com',
@@ -174,11 +174,11 @@ test('schema v1->v2 migration backfills duration_ms and desensitized usage_event
     store.finish(t.id, 'succeeded', 'SECRET_OUTPUT_CONTENT');
 
     // Simulate a v1 database snapshot before closing
-    store.db.exec('DROP TABLE usage_events; ALTER TABLE tasks DROP COLUMN duration_ms; PRAGMA user_version = 1;');
+    store.db.exec('DROP INDEX IF EXISTS tasks_payload_purge; DROP TABLE usage_events; ALTER TABLE tasks DROP COLUMN duration_ms; ALTER TABLE tasks DROP COLUMN payload_purged; ALTER TABLE tasks DROP COLUMN payload_purged_at; PRAGMA user_version = 1;');
     store.db.close();
 
     store = new Store(file);
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
     const cols = store.db.prepare('PRAGMA table_info(usage_events)').all().map(c => c.name);
     assert.equal(cols.includes('args'), false);
     assert.equal(cols.includes('output'), false);
@@ -282,5 +282,84 @@ test('usageAnalytics aggregates trends, tools, devices and survives task retenti
     assert.equal(exceededQuota.percent, 120);
     assert.equal(exceededQuota.warning, true);
     assert.equal(exceededQuota.blocking, false);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('schema v2->v3 migration and short-lived relay payload purge preserve metadata and usage analytics', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-payload-ttl-'));
+  const file = join(folder, 'gateway.sqlite');
+  let store = new Store(file);
+  try {
+    const u = store.createGoogleUser({
+      sub: 'sub-ttl',
+      email: 'ttl@example.com',
+      displayName: 'TTL User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(u.status, 'ok');
+    const userId = u.user.id;
+    const dev = store.pair(store.invite('TTL-Box', ['read', 'write'], userId), secret());
+    const boot = randomUUID();
+    store.sync(dev.id, boot, 'darwin', []);
+
+    const expiredDone = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: '/secret/a.txt' } }, userId);
+    store.finish(expiredDone.id, 'succeeded', 'SECRET_OUTPUT_OLD', { content: [{ type: 'text', text: 'SECRET_MCP_OLD' }] });
+
+    const freshDone = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: '/secret/b.txt' } }, userId);
+    store.finish(freshDone.id, 'succeeded', 'FRESH_OUTPUT', { content: [{ type: 'text', text: 'FRESH_MCP' }] });
+
+    const activeTask = store.submit(dev.id, 'dc_call', { tool: 'write_file', arguments: { path: '/secret/c.txt', content: 'keep-me' } }, userId);
+
+    // Simulate v2 DB snapshot and verify v2 -> v3 migration
+    store.db.exec('DROP INDEX IF EXISTS tasks_payload_purge; ALTER TABLE tasks DROP COLUMN payload_purged; ALTER TABLE tasks DROP COLUMN payload_purged_at; PRAGMA user_version = 2;');
+    store.db.close();
+
+    store = new Store(file);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
+
+    const now = Date.now();
+    // Backdate expiredDone to 31m ago, freshDone to 5m ago, activeTask to 40m ago (with future deadline)
+    store.db.prepare('UPDATE tasks SET created=?, changed=? WHERE id=?').run(now - 31 * 60_000 - 150, now - 31 * 60_000, expiredDone.id);
+    store.db.prepare('UPDATE tasks SET created=?, changed=? WHERE id=?').run(now - 5 * 60_000 - 80, now - 5 * 60_000, freshDone.id);
+    store.db.prepare('UPDATE tasks SET created=?, changed=?, deadline=? WHERE id=?').run(now - 40 * 60_000, now - 40 * 60_000, now + 600_000, activeTask.id);
+
+    // resultTtlMinutes = 0 disables early payload purge
+    assert.equal(store.purgeExpiredPayloads(0, now), 0);
+    assert.equal(store.task(expiredDone.id).output, 'SECRET_OUTPUT_OLD');
+
+    // Default 30m TTL purges only expiredDone, keeping freshDone and activeTask untouched
+    store.maintain(7, 90, 30, 210, 30);
+
+    const purgedRow = store.task(expiredDone.id);
+    assert.equal(purgedRow.args, '{}');
+    assert.equal(purgedRow.output, null);
+    assert.equal(purgedRow.mcp_result, null);
+    assert.equal(purgedRow.payload_purged, 1);
+    assert.ok(purgedRow.payload_purged_at > 0);
+
+    const purgedView = store.view(purgedRow);
+    assert.equal(purgedView.payloadPurged, true);
+    assert.ok(purgedView.payloadPurgedAt);
+    assert.equal(purgedView.output, null);
+    assert.equal(Object.hasOwn(purgedView, 'result'), false);
+    assert.equal(purgedView.toolName, 'read_file');
+    assert.equal(purgedView.status, 'succeeded');
+    assert.ok(purgedView.durationMs >= 0);
+
+    const freshView = store.view(store.task(freshDone.id));
+    assert.equal(freshView.payloadPurged, false);
+    assert.equal(freshView.output, 'FRESH_OUTPUT');
+    assert.equal(freshView.result.content[0].text, 'FRESH_MCP');
+
+    const activeRow = store.task(activeTask.id);
+    assert.equal(activeRow.payload_purged, 0);
+    assert.match(activeRow.args, /keep-me/);
+
+    // Metadata & usage analytics remain completely intact after payload purge
+    assert.equal(store.monthlyCalls(userId), 3);
+    const analytics = store.usageAnalytics(userId);
+    assert.equal(analytics.summary.monthCalls, 3);
+    assert.equal(analytics.summary.succeededCalls30d, 2);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

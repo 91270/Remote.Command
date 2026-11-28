@@ -195,7 +195,7 @@ node "$rcm_client/dist/remote-cli.js" service install "$HOME/.remote-command/age
 
 ## 6. 在线备份与恢复演练
 
-备份文件包含用户、设备配对、工具结果与审计历史，请仅限管理员读写，并在异机保留加密副本。SQLite 快照之外，还需单独备份 `.env`、`data/.owner_key`、Compose 和 Nginx 配置。
+备份文件包含用户、设备配对、审计历史以及尚未过期的近期工具结果，请仅限管理员读写，并在异机保留加密副本。Gateway 默认在任务结束 **30 分钟**（`RCM_RESULT_TTL_MINUTES`）后自动清空任务正文（`args` / `output` / `mcp_result`），有效缩短敏感正文在备份中的暴露窗口。SQLite 快照之外，还需单独备份 `.env`、`data/.owner_key`、Compose 和 Nginx 配置。
 
 ### 在线备份与校验
 
@@ -241,7 +241,7 @@ docker compose up -d --wait gateway
 | **服务健康** | `/healthz`（存活）与 `/readyz`（数据库可访问）均返回 `200`。 |
 | **HTTPS 与 OAuth** | 确认 TLS 证书有效，`/.well-known/oauth-protected-resource/mcp` 指向你的 HTTPS Gateway，且 `/auth/google/start` 能正常重定向到 Google 授权页。 |
 | **日志与磁盘** | 执行 `docker compose logs --tail 100 gateway`，查看限流或上游 OIDC 错误；检查宿主机 Nginx 日志与备份磁盘空间。 |
-| **数据保留策略** | 已结束任务默认保留 **7 天**（`RCM_TASK_RETENTION_DAYS`），脱敏用量元数据（`usage_events`，不含参数与输出正文）默认保留 **210 天**以支撑近 6 个月趋势统计，审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
+| **数据保留策略** | 终态任务正文（`args` / `output` / `mcp_result`）默认保留 **30 分钟**（`RCM_RESULT_TTL_MINUTES`，设为 `0` 可关闭提前清理），到期后仅保留任务元数据（默认 **7 天**，`RCM_TASK_RETENTION_DAYS`）；脱敏用量元数据（`usage_events`，不含参数与输出正文）默认保留 **210 天**以支撑近 6 个月趋势统计，审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
 | **月度软配额告警** | 可选配置 `RCM_MONTHLY_SOFT_QUOTA`（正整数；未配置或 `0` 表示关闭）。当月调用量达到 **80%** 阈值时，`/manage` 控制台与 `who_am_i` 工具将返回非阻断软告警（默认不阻断任何自建工具调用）。 |
 | **紧急撤销与诊断** | 控制台 `/manage` 可按用户撤销单台设备、全部设备或 OAuth 授权，管理员还可停用异常成员账号；客户端可使用 `remote --report` 导出脱敏诊断包。 |
 
