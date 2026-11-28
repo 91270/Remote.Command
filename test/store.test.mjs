@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store, evaluateMonthlySoftQuota } from '../dist/store.js';
-import { endpoint, secret, syncReply } from '../dist/protocol.js';
+import { endpoint, hash, secret, syncReply } from '../dist/protocol.js';
 
 test('store: invites, capability checks, lost responses, replacement, terminal acknowledgement and revocation', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'rcm-store-'));
@@ -159,7 +159,7 @@ test('schema v1->v2 migration backfills duration_ms and desensitized usage_event
   const file = join(folder, 'gateway.sqlite');
   let store = new Store(file);
   try {
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 4);
     const created = store.createGoogleUser({
       sub: 'sub-migrate-v2',
       email: 'migrate@example.com',
@@ -178,7 +178,7 @@ test('schema v1->v2 migration backfills duration_ms and desensitized usage_event
     store.db.close();
 
     store = new Store(file);
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 4);
     const cols = store.db.prepare('PRAGMA table_info(usage_events)').all().map(c => c.name);
     assert.equal(cols.includes('args'), false);
     assert.equal(cols.includes('output'), false);
@@ -316,7 +316,7 @@ test('schema v2->v3 migration and short-lived relay payload purge preserve metad
     store.db.close();
 
     store = new Store(file);
-    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 4);
 
     const now = Date.now();
     // Backdate expiredDone to 31m ago, freshDone to 5m ago, activeTask to 40m ago (with future deadline)
@@ -361,5 +361,126 @@ test('schema v2->v3 migration and short-lived relay payload purge preserve metad
     const analytics = store.usageAnalytics(userId);
     assert.equal(analytics.summary.monthCalls, 3);
     assert.equal(analytics.summary.succeededCalls30d, 2);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('schema v3->v4 migration, billable monthly metering, redeem codes, idempotency, stacking, and expiry downgrade', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-plan-quota-'));
+  const file = join(folder, 'gateway.sqlite');
+  let store = new Store(file);
+  try {
+    const adminRes = store.createGoogleUser({
+      sub: 'sub-plan-admin',
+      email: 'plan-admin@example.com',
+      displayName: 'Plan Admin',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(adminRes.status, 'ok');
+    store.setRegistrationMode('open');
+    const freeRes = store.createGoogleUser({
+      sub: 'sub-plan-free',
+      email: 'plan-free@example.com',
+      displayName: 'Free User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(freeRes.status, 'ok');
+    assert.equal(freeRes.user.plan, 'free');
+    const freeId = freeRes.user.id;
+    const dev = store.pair(store.invite('Free-Box', ['read', 'write', 'exec'], freeId), secret());
+    store.sync(dev.id, randomUUID(), 'linux', []);
+
+    // Billable metering: succeeded & failed dc_call count once; denied/cancelled/timed_out/disconnect do not
+    const tSucc = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: 'a.txt' } }, freeId);
+    store.finish(tSucc.id, 'succeeded', 'ok');
+    store.finish(tSucc.id, 'succeeded', 'duplicate'); // duplicate finish does not double-bill
+    const tFail = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: 'missing.txt' } }, freeId);
+    store.finish(tFail.id, 'failed', 'ENOENT');
+    const tDeny = store.submit(dev.id, 'dc_call', { tool: 'write_file', arguments: { path: 'x.txt', content: '1' } }, freeId);
+    store.finish(tDeny.id, 'denied', 'denied');
+    const tCancel = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: 'c.txt' } }, freeId);
+    store.cancel(tCancel.id, freeId);
+    const tDisc = store.submit(dev.id, 'disconnect', {}, freeId);
+    store.finish(tDisc.id, 'succeeded', 'bye');
+
+    assert.equal(store.billableMonthlyCalls(freeId), 2);
+
+    // Simulate v3 DB and verify v3 -> v4 migration backfills usage_monthly
+    store.db.exec('DELETE FROM usage_monthly; PRAGMA user_version = 3;');
+    store.db.close();
+    store = new Store(file);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 4);
+    assert.equal(store.billableMonthlyCalls(freeId), 2);
+
+    // Next UTC month automatically resets billableMonthlyCalls to 0
+    const now = Date.now();
+    const d = new Date(now);
+    const nextMonth = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 2);
+    assert.equal(store.billableMonthlyCalls(freeId, nextMonth), 0);
+
+    // Quota status thresholds at 80% and 100%
+    store.db.prepare('UPDATE users SET custom_monthly_quota=2 WHERE id=?').run(freeId);
+    const exceeded = store.getUserPlanStatus(freeId, now);
+    assert.equal(exceeded.status, 'exceeded');
+    assert.equal(exceeded.exceeded, true);
+    assert.equal(exceeded.remaining, 0);
+
+    // Create & redeem monthly + quarterly stacking, single-use exhaustion, idempotency, revoke, lifetime & downgrade
+    const monthCode = store.createRedeemCode(adminRes.user.id, { tier: 'monthly', maxUses: 1, note: 'month' });
+    const quarterCode = store.createRedeemCode(adminRes.user.id, { tier: 'quarterly', maxUses: 1 });
+    const revokedCode = store.createRedeemCode(adminRes.user.id, { tier: 'monthly', maxUses: 1 });
+    assert.equal(store.revokeRedeemCode(hash(revokedCode.code), adminRes.user.id), true);
+    assert.equal(store.redeemProCode(freeId, revokedCode.code, now).status, 'revoked');
+    assert.equal(store.redeemProCode(freeId, 'PRO-NOPE-00000-00000', now).status, 'invalid');
+
+    const r1 = store.redeemProCode(freeId, monthCode.code.toLowerCase(), now);
+    assert.equal(r1.status, 'ok');
+    assert.equal(r1.tier, 'monthly');
+    assert.equal(r1.planQuota.plan, 'pro');
+    assert.equal(r1.planQuota.status, 'unlimited');
+    assert.equal(store.redeemProCode(freeId, monthCode.code, now).status, 'already_redeemed');
+
+    // Second user cannot consume single-use exhausted code
+    const secondRes = store.createGoogleUser({
+      sub: 'sub-plan-second',
+      email: 'plan-second@example.com',
+      displayName: 'Second User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(store.redeemProCode(secondRes.user.id, monthCode.code, now).status, 'exhausted');
+
+    // Stacking quarterly on top of active monthly extends by 90 days
+    const r2 = store.redeemProCode(freeId, quarterCode.code, now);
+    assert.equal(r2.status, 'ok');
+    const expectedStacked = now + (30 + 90) * 86400000;
+    assert.equal(new Date(r2.planQuota.planExpiresAt).getTime(), expectedStacked);
+
+    // Expiry triggers automatic downgrade back to Free
+    const afterExpiry = expectedStacked + 1000;
+    const downgraded = store.getUserPlanStatus(freeId, afterExpiry);
+    assert.equal(downgraded.plan, 'free');
+    assert.equal(downgraded.planExpiresAt, null);
+    assert.equal(store.recentAudit(10, freeId).some(a => a.event === 'plan_expired_downgraded'), true);
+
+    // Lifetime Pro refuses timed codes without wasting them
+    const lifeCode = store.createRedeemCode(adminRes.user.id, { tier: 'lifetime', maxUses: 1 });
+    const extraMonth = store.createRedeemCode(adminRes.user.id, { tier: 'monthly', maxUses: 1 });
+    const rLife = store.redeemProCode(freeId, lifeCode.code, afterExpiry);
+    assert.equal(rLife.status, 'ok');
+    assert.equal(rLife.planQuota.planExpiresAt, null);
+    assert.equal(store.redeemProCode(freeId, extraMonth.code, afterExpiry).status, 'already_lifetime');
+    // extraMonth wasn't wasted, so secondRes can still redeem it
+    assert.equal(store.redeemProCode(secondRes.user.id, extraMonth.code, afterExpiry).status, 'ok');
+
+    // grantUserPlan extension point downgrades or extends cleanly
+    const granted = store.grantUserPlan(secondRes.user.id, { plan: 'free', source: 'webhook_cancel', externalRef: 'sub_123', now: afterExpiry });
+    assert.equal(granted.plan, 'free');
+    assert.equal(store.userRedemptions(freeId, 10).length, 3);
+    // Ensure plaintext codes never appear in audit logs
+    const auditText = JSON.stringify(store.recentAudit(50));
+    assert.equal(auditText.includes(monthCode.code), false);
+    assert.equal(auditText.includes(lifeCode.code), false);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

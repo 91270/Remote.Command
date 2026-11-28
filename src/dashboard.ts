@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { HttpError, json, readJson } from './http.js';
 import { approvalModes, capabilities, match, secret, terminal, uuid, type ApprovalMode, type Capability } from './protocol.js';
-import type { RateLimiter } from './rate-limit.js';
+import { ipDigest, type RateLimiter } from './rate-limit.js';
 import { evaluateMonthlySoftQuota, type Store, type UserRecord } from './store.js';
 
 const sessionLifetime = 8 * 60 * 60 * 1000;
@@ -11,6 +11,7 @@ const key = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const deviceName = z.string().trim().min(1).max(80).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
 const pairingCode = z.string().trim().regex(/^[A-Za-z0-9-]{4,32}$/);
 const oauthClientId = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
+const redeemCodeInput = z.string().trim().min(4).max(64).regex(/^[A-Za-z0-9-]+$/);
 const assets = new Map([
   ['/manage/assets/dashboard.css', ['dashboard.css', 'text/css; charset=utf-8']],
   ['/manage/assets/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']],
@@ -104,6 +105,7 @@ export class Dashboard {
       const userId = session.user.id;
 
       if (req.method === 'GET' && url.pathname === '/manage/api/session') {
+        const planQuota = this.store.getUserPlanStatus(userId);
         json(res, 200, {
           csrf: session.csrf,
           userId,
@@ -111,7 +113,8 @@ export class Dashboard {
           email: session.user.email,
           displayName: session.user.displayName,
           role: session.user.role,
-          plan: session.user.plan,
+          plan: planQuota?.plan ?? session.user.plan,
+          planExpiresAt: planQuota?.planExpiresAt ?? null,
           googleEnabled: !!this.config.googleEnabled,
           origin: this.config.origin,
           mcpUrl: this.config.origin + '/mcp'
@@ -123,16 +126,73 @@ export class Dashboard {
         const taskCounts = this.store.taskStatusCounts(userId);
         const monthlyCalls = this.store.monthlyCalls(userId);
         const softQuota = evaluateMonthlySoftQuota(monthlyCalls, this.config.monthlySoftQuota);
+        const planQuota = this.store.getUserPlanStatus(userId);
         json(res, 200, {
           devices,
           taskCounts,
           totalCalls: this.store.totalCalls(userId),
           monthlyCalls,
           softQuota,
+          planQuota,
           activeTasks: Object.entries(taskCounts).filter(([status]) => !terminal.some(value => value === status)).reduce((sum, [, count]) => sum + count, 0),
           mcpUrl: this.config.origin + '/mcp',
           serverTime: new Date().toISOString()
         });
+        return true;
+      }
+      if (req.method === 'GET' && url.pathname === '/manage/api/plan') {
+        json(res, 200, {
+          planQuota: this.store.getUserPlanStatus(userId),
+          redemptions: this.store.userRedemptions(userId, 20)
+        });
+        return true;
+      }
+      if (req.method === 'POST' && url.pathname === '/manage/api/plan/redeem') {
+        if (this.config.rateLimiter) {
+          const ip = this.config.rateLimiter.clientIp(req);
+          const rlKey = `${userId}:${ip}`;
+          const st = this.config.rateLimiter.consume('redeem_code', rlKey);
+          if (!st.allowed) {
+            if (this.config.rateLimiter.shouldAudit('redeem_code', rlKey)) {
+              this.store.audit('rate_limited', { bucket: 'redeem_code', route: '/manage/api/plan/redeem', ip: ipDigest(ip) }, userId);
+            }
+            json(res, 429, { error: `兑换尝试过于频繁，请在 ${st.retryAfterSec} 秒后再试。` }, { 'Retry-After': String(st.retryAfterSec) });
+            return true;
+          }
+        }
+        const input = z.strictObject({ code: redeemCodeInput }).parse(await readJson(req, 4096));
+        const outcome = this.store.redeemProCode(userId, input.code);
+        if (outcome.status === 'ok') {
+          json(res, 200, {
+            ok: true,
+            tier: outcome.tier,
+            durationDays: outcome.durationDays,
+            planQuota: outcome.planQuota,
+            redemptions: this.store.userRedemptions(userId, 20)
+          });
+          return true;
+        }
+        if (outcome.status === 'already_redeemed') {
+          json(res, 409, { error: '你已核销过该兑换码，无需重复激活。', code: 'already_redeemed' });
+          return true;
+        }
+        if (outcome.status === 'already_lifetime') {
+          json(res, 409, { error: '当前账号已是永久 Pro，无需核销限时兑换码。', code: 'already_lifetime' });
+          return true;
+        }
+        if (outcome.status === 'exhausted') {
+          json(res, 409, { error: '该兑换码已被使用完毕。', code: 'exhausted' });
+          return true;
+        }
+        if (outcome.status === 'expired') {
+          json(res, 400, { error: '该兑换码已过期。', code: 'expired' });
+          return true;
+        }
+        if (outcome.status === 'revoked') {
+          json(res, 400, { error: '该兑换码已作废。', code: 'revoked' });
+          return true;
+        }
+        json(res, 400, { error: '兑换码无效，请核对后重试。', code: 'invalid' });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/usage') {

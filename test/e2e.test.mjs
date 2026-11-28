@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { createServer as httpsServer, request as httpsRequest } from 'node:https';
 import { request as httpRequest } from 'node:http';
@@ -353,6 +354,9 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     assert.ok(Array.isArray(blocked.structuredContent.guidance) && blocked.structuredContent.guidance.length > 0);
     assert.equal((await tool('list_devices')).length, 0);
     const whoBefore = await tool('who_am_i');
+    const nowDate = new Date();
+    const expectedMonth = `${nowDate.getUTCFullYear()}-${String(nowDate.getUTCMonth() + 1).padStart(2, '0')}`;
+    const expectedReset = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() + 1, 1)).toISOString();
     assert.deepEqual(whoBefore, {
       user: 'owner@example.com',
       displayName: 'Owner',
@@ -360,9 +364,30 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
       username: null,
       role: 'admin',
       plan: 'pro',
+      planExpiresAt: null,
       authMethods: ['google'],
       devices: { paired: 0, online: 0, offline: 0, selectedDevice: null },
-      usage: { retainedCalls: 0, monthlyCalls: 0, activeTasks: 0, callQuota: null, softQuota: null },
+      usage: {
+        retainedCalls: 0,
+        monthlyCalls: 0,
+        billableMonthlyCalls: 0,
+        activeTasks: 0,
+        callQuota: null,
+        planQuota: {
+          plan: 'pro',
+          planExpiresAt: null,
+          month: expectedMonth,
+          used: 0,
+          limit: null,
+          remaining: null,
+          percent: 0,
+          status: 'unlimited',
+          warning: false,
+          exceeded: false,
+          resetAt: expectedReset
+        },
+        softQuota: null
+      },
       version: pkgVersion
     });
     const store = new Store(db);
@@ -685,6 +710,142 @@ test('RCM_RESULT_TTL_MINUTES purges expired task payloads while get_tool_result 
     assert.match(body.notice, /automatically purged/i);
     assert.equal(JSON.stringify(body).includes('TOP_SECRET'), false);
   } finally {
+    await client?.close();
+    await stop(gateway);
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('Free plan quota enforces 80% notice, 100% device call pause while keeping devices online, and Pro redeem recovery', { timeout: 25000 }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-free-quota-e2e-'));
+  const db = join(temp, 'gateway.sqlite');
+  const p = await port();
+  const origin = `http://127.0.0.1:${p}`;
+  const env = {
+    ...process.env,
+    STATE_DB: db,
+    PUBLIC_ORIGIN: origin,
+    ALLOW_INSECURE_LOOPBACK: '1',
+    PORT: String(p),
+    BIND_HOST: '127.0.0.1',
+    OWNER_KEY: secret(),
+    GOOGLE_CLIENT_ID: 'fixture-google-client',
+    GOOGLE_CLIENT_SECRET: 'fixture-google-secret'
+  };
+  let gateway, client;
+  let stopDeviceLoop = false;
+  let deviceLoop;
+  try {
+    const catalog = JSON.parse(await readFile('vendor/desktop-commander-full/catalog.json', 'utf8'));
+    const seedStore = new Store(db);
+    const adminRes = seedStore.createGoogleUser({
+      sub: 'e2e-fq-admin',
+      email: 'fq-admin@example.com',
+      displayName: 'FQ Admin',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(adminRes.status, 'ok');
+    seedStore.setRegistrationMode('open');
+    const freeRes = seedStore.createGoogleUser({
+      sub: 'e2e-fq-user',
+      email: 'fq-user@example.com',
+      displayName: 'FQ User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(freeRes.status, 'ok');
+    const freeId = freeRes.user.id;
+    seedStore.db.prepare('UPDATE users SET custom_monthly_quota=5 WHERE id=?').run(freeId);
+
+    const accessToken = secret();
+    seedStore.putAuth(accessToken, 'access', 3600000, { userId: freeId, scope: 'remote:use' });
+    const dashToken = secret();
+    const dashCsrf = secret();
+    seedStore.putAuth(dashToken, 'dashboard', 3600000, { csrf: dashCsrf, userId: freeId, username: freeRes.user.email, role: 'user' });
+    const dashCookie = `rcm_dashboard=${dashToken}`;
+
+    const devCred = secret();
+    const dev = seedStore.pair(seedStore.invite('FreeBox', ['read'], freeId), devCred);
+    const boot = randomUUID();
+    seedStore.sync(dev.id, boot, 'linux', [], catalog);
+    // Seed 4 billable calls (80% of quota 5)
+    for (let i = 0; i < 4; i++) {
+      const t = seedStore.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: 'a.txt' } }, freeId);
+      seedStore.finish(t.id, 'succeeded', 'ok');
+    }
+    const proCode = seedStore.createRedeemCode(adminRes.user.id, { tier: 'monthly', maxUses: 1 });
+    seedStore.db.close();
+
+    gateway = start(['dist/gateway.js'], { env });
+    await until(async () => (await fetch(origin + '/healthz')).ok);
+
+    // Lightweight simulated device worker answering /device/sync
+    let seq = 1;
+    deviceLoop = (async () => {
+      let updates = [];
+      while (!stopDeviceLoop) {
+        try {
+          const syncRes = await post(origin + '/device/sync', { boot, platform: 'linux', updates, ready: true }, jwt(devCred));
+          if (syncRes.ok) {
+            const reply = await syncRes.json();
+            updates = (reply.jobs || []).map(job => ({
+              id: job.id,
+              seq: seq++,
+              status: 'succeeded',
+              output: 'device ok',
+              result: { content: [{ type: 'text', text: 'device ok' }] }
+            }));
+          }
+        } catch { /* ignore on shutdown */ }
+        await delay(80);
+      }
+    })();
+
+    client = new Client({ name: 'free-quota-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(origin + '/mcp'), { requestInit: { headers: jwt(accessToken) } }));
+
+    // 5th call (starting from 4/5 = 80%) is allowed and includes [Quota Notice]
+    const who80 = JSON.parse((await client.callTool({ name: 'who_am_i', arguments: {} })).content[0].text);
+    assert.equal(who80.plan, 'free');
+    assert.equal(who80.usage.billableMonthlyCalls, 4);
+    assert.equal(who80.usage.planQuota.status, 'warning');
+
+    const call5 = await client.callTool({ name: 'read_file', arguments: { device_id: dev.id, path: 'b.txt' } });
+    assert.equal(call5.isError, undefined);
+    assert.equal(call5.content[0].text, 'device ok');
+    assert.match(call5.content[1].text, /Quota Notice.*5\/5 \(100%\)/);
+
+    // 6th call (at 5/5 = 100%) is blocked, while device remains paired/online and control tools still work
+    const call6 = await client.callTool({ name: 'read_file', arguments: { device_id: dev.id, path: 'c.txt' } });
+    assert.equal(call6.isError, true);
+    assert.match(call6.content[0].text, /Monthly Free plan quota reached \(5\/5\)/);
+
+    const devices = JSON.parse((await client.callTool({ name: 'list_devices', arguments: {} })).content[0].text);
+    assert.equal(devices.length, 1);
+    assert.equal(devices[0].online, true);
+    assert.equal(devices[0].revoked, false);
+
+    // Redeem Pro code via dashboard API -> immediately restores device calls
+    const redeemRes = await post(
+      origin + '/manage/api/plan/redeem',
+      { code: proCode.code },
+      { Origin: origin, Cookie: dashCookie, 'X-CSRF-Token': dashCsrf }
+    );
+    assert.equal(redeemRes.status, 200);
+    assert.equal((await redeemRes.json()).planQuota.plan, 'pro');
+
+    const whoPro = JSON.parse((await client.callTool({ name: 'who_am_i', arguments: {} })).content[0].text);
+    assert.equal(whoPro.plan, 'pro');
+    assert.ok(whoPro.planExpiresAt);
+
+    const call7 = await client.callTool({ name: 'read_file', arguments: { device_id: dev.id, path: 'd.txt' } });
+    assert.equal(call7.isError, undefined);
+    assert.equal(call7.content.length, 1);
+    assert.equal(call7.content[0].text, 'device ok');
+  } finally {
+    stopDeviceLoop = true;
+    await deviceLoop;
     await client?.close();
     await stop(gateway);
     await rm(temp, { recursive: true, force: true });

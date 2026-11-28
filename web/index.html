@@ -288,9 +288,10 @@
                 <span id="badge-plan-free" class="pill online" hidden>当前套餐</span>
               </div>
               <p class="plan-price">$0 <span class="subtle">/ 月</span></p>
+              <p id="plan-free-usage" class="subtle"></p>
             </div>
             <ul class="plan-features">
-              <li>每月 10,000 次工具调用（每月 1 日重置）</li>
+              <li>每月 10,000 次有效设备调用（每月 1 日 00:00 UTC 重置）</li>
               <li>支持 ChatGPT 及标准 Remote MCP 客户端</li>
               <li>工作区隔离、本地人工审批与审计记录</li>
             </ul>
@@ -304,14 +305,33 @@
                 <span id="badge-plan-pro" class="pill online" hidden>当前套餐</span>
               </div>
               <p class="plan-price">Unlimited</p>
+              <p id="plan-pro-expiry" class="subtle" hidden></p>
             </div>
             <ul class="plan-features">
               <li>无限次月度工具调用，重度自动化无限制</li>
               <li>全功能多设备管理与持续演进支持</li>
-              <li>支持管理员授权或兑换码自助激活（#23 即将上线）</li>
+              <li>支持月卡 / 季卡 / 年卡 / 永久兑换码或管理员授权激活</li>
             </ul>
-            <button id="plan-upgrade-btn" type="button" class="primary">兑换码升级（即将上线）</button>
+            <button id="plan-upgrade-btn" type="button" class="primary">输入兑换码激活 Pro</button>
           </article>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>Pro 兑换码激活</h2>
+              <p>输入管理员发放的 Pro 兑换码（支持月卡、季卡、年卡、永久卡），激活后立即恢复无限次调用。</p>
+            </div>
+          </div>
+          <form id="redeem-form" class="redeem-row">
+            <input id="redeem-code-input" name="code" type="text" maxlength="64" autocomplete="off" spellcheck="false" placeholder="例如：PRO-XXXXX-XXXXX-XXXXX" aria-label="Pro 兑换码" required>
+            <button id="redeem-submit-btn" type="submit" class="primary">立即激活 Pro</button>
+          </form>
+          <p id="redeem-feedback" class="subtle" role="status"></p>
+          <div id="redeem-history-wrap" hidden>
+            <h3>最近兑换记录</h3>
+            <div id="redeem-history" class="device-list" aria-live="polite"></div>
+          </div>
         </div>
 
         <div class="card">

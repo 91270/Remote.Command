@@ -1,12 +1,32 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, capabilities, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+export const DEFAULT_FREE_MONTHLY_QUOTA = 10000;
+export const redeemTiers = ['monthly', 'quarterly', 'yearly', 'lifetime'] as const;
+export type RedeemTier = (typeof redeemTiers)[number];
+const tierDurationDays: Record<RedeemTier, number | null> = {
+  monthly: 30,
+  quarterly: 90,
+  yearly: 365,
+  lifetime: null
+};
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function utcMonthKey(now = Date.now()): string {
+  const d = new Date(now);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+function generateProCode(): string {
+  const bytes = randomBytes(15);
+  let chars = '';
+  for (let i = 0; i < 15; i++) chars += CODE_ALPHABET[bytes[i]! & 31]!;
+  return `PRO-${chars.slice(0, 5)}-${chars.slice(5, 10)}-${chars.slice(10, 15)}`;
+}
 const liveSql = "('dispatched','awaiting_approval','running')";
 const outstandingSql = "('queued','dispatched','awaiting_approval','running')";
 const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interrupted')";
@@ -82,6 +102,32 @@ export type UsageAnalytics = {
   statusBreakdown30d: Record<string, number>;
   generatedAt: string;
 };
+export type PlanQuotaStatus = {
+  plan: 'free' | 'pro';
+  planExpiresAt: string | null;
+  month: string;
+  used: number;
+  limit: number | null;
+  remaining: number | null;
+  percent: number;
+  status: 'unlimited' | 'ok' | 'warning' | 'exceeded';
+  warning: boolean;
+  exceeded: boolean;
+  resetAt: string;
+};
+export type RedeemHistoryRecord = {
+  id: number;
+  codePrefix: string;
+  tier: RedeemTier;
+  durationDays: number | null;
+  previousPlan: 'free' | 'pro';
+  newPlan: 'free' | 'pro';
+  newExpiresAt: string | null;
+  redeemedAt: string;
+};
+export type RedeemResult =
+  | { status: 'ok'; tier: RedeemTier; durationDays: number | null; planQuota: PlanQuotaStatus }
+  | { status: 'invalid' | 'revoked' | 'expired' | 'exhausted' | 'already_redeemed' | 'already_lifetime' | 'user_not_found' };
 
 export function evaluateMonthlySoftQuota(
   monthlyCalls: number,
@@ -206,7 +252,18 @@ export class Store {
         created_by TEXT NOT NULL, created_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS usage_events (task_id TEXT PRIMARY KEY, user_id TEXT, device_id TEXT NOT NULL,
         tool_name TEXT NOT NULL, op TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,
-        finished_at INTEGER, duration_ms INTEGER);`);
+        finished_at INTEGER, duration_ms INTEGER);
+      CREATE TABLE IF NOT EXISTS usage_monthly (user_id TEXT NOT NULL, month TEXT NOT NULL,
+        billable_calls INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(user_id, month));
+      CREATE TABLE IF NOT EXISTS redeem_codes (code_hash TEXT PRIMARY KEY, code_prefix TEXT NOT NULL,
+        plan TEXT NOT NULL DEFAULT 'pro', tier TEXT NOT NULL, duration_days INTEGER, note TEXT,
+        max_uses INTEGER NOT NULL DEFAULT 1, used_count INTEGER NOT NULL DEFAULT 0, expires_at INTEGER,
+        revoked INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS redeem_redemptions (id INTEGER PRIMARY KEY, code_hash TEXT NOT NULL,
+        code_prefix TEXT NOT NULL, user_id TEXT NOT NULL, tier TEXT NOT NULL, duration_days INTEGER,
+        previous_plan TEXT NOT NULL, new_plan TEXT NOT NULL, new_expires_at INTEGER, redeemed_at INTEGER NOT NULL,
+        UNIQUE(code_hash, user_id));`);
     this.migrate();
   }
 
@@ -257,6 +314,7 @@ export class Store {
         CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS usage_events_user_created ON usage_events(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS usage_events_created ON usage_events(created_at);
+        CREATE INDEX IF NOT EXISTS redeem_redemptions_user ON redeem_redemptions(user_id, redeemed_at DESC);
       `);
 
       if (!this.db.prepare("SELECT 1 FROM counters WHERE name='calls'").get()) {
@@ -287,6 +345,17 @@ export class Store {
             CASE WHEN status IN ${doneSql} THEN changed ELSE NULL END,
             CASE WHEN status IN ${doneSql} THEN COALESCE(duration_ms, MAX(0, changed - created)) ELSE NULL END
           FROM tasks;
+        `);
+      }
+
+      if (currentVersion < 4) {
+        this.db.exec(`
+          INSERT OR IGNORE INTO usage_monthly(user_id, month, billable_calls, updated_at)
+          SELECT user_id, strftime('%Y-%m', created_at / 1000.0, 'unixepoch') AS month,
+            COUNT(*) AS billable_calls, MAX(COALESCE(finished_at, created_at)) AS updated_at
+          FROM usage_events
+          WHERE user_id IS NOT NULL AND op IN ('dc_call','dc_resource') AND status IN ('succeeded','failed')
+          GROUP BY user_id, month;
         `);
       }
 
@@ -342,6 +411,250 @@ export class Store {
 
   setRegistrationMode(mode: RegistrationMode, actorUserId?: string): void {
     this.setSetting('registration_mode', mode, actorUserId);
+  }
+
+  getDefaultFreeMonthlyQuota(): number {
+    const raw = this.getSetting('free_monthly_quota');
+    const n = raw ? Number(raw) : NaN;
+    return Number.isSafeInteger(n) && n >= 1 ? n : DEFAULT_FREE_MONTHLY_QUOTA;
+  }
+
+  billableMonthlyCalls(userId: string, now = Date.now()): number {
+    const row = this.db.prepare('SELECT billable_calls FROM usage_monthly WHERE user_id=? AND month=?')
+      .get(userId, utcMonthKey(now)) as { billable_calls: number } | undefined;
+    return row ? Number(row.billable_calls) : 0;
+  }
+
+  private _downgradeExpiredProUsers(now = Date.now(), userId?: string): number {
+    const rows = userId
+      ? this.db.prepare("SELECT id, plan_expires_at FROM users WHERE id=? AND plan='pro' AND plan_expires_at IS NOT NULL AND plan_expires_at<=?")
+          .all(userId, now) as { id: string; plan_expires_at: number }[]
+      : this.db.prepare("SELECT id, plan_expires_at FROM users WHERE plan='pro' AND plan_expires_at IS NOT NULL AND plan_expires_at<=?")
+          .all(now) as { id: string; plan_expires_at: number }[];
+    let downgraded = 0;
+    for (const row of rows) {
+      const res = this.db.prepare(
+        "UPDATE users SET plan='free', plan_expires_at=NULL WHERE id=? AND plan='pro' AND plan_expires_at IS NOT NULL AND plan_expires_at<=?"
+      ).run(row.id, now);
+      if (res.changes) {
+        downgraded++;
+        this.audit('plan_expired_downgraded', {
+          previousPlan: 'pro',
+          expiredAt: new Date(Number(row.plan_expires_at)).toISOString()
+        }, row.id);
+      }
+    }
+    return downgraded;
+  }
+
+  downgradeExpiredProUsers(now = Date.now(), userId?: string): number {
+    return this.tx(() => this._downgradeExpiredProUsers(now, userId));
+  }
+
+  private _buildUserPlanStatus(userId: string, now = Date.now()): PlanQuotaStatus | null {
+    const user = this.findUserById(userId);
+    if (!user) return null;
+    const d = new Date(now);
+    const month = utcMonthKey(now);
+    const resetAt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
+    const used = this.billableMonthlyCalls(userId, now);
+    if (user.plan === 'pro') {
+      return {
+        plan: 'pro',
+        planExpiresAt: user.planExpiresAt ? new Date(user.planExpiresAt).toISOString() : null,
+        month,
+        used,
+        limit: null,
+        remaining: null,
+        percent: 0,
+        status: 'unlimited',
+        warning: false,
+        exceeded: false,
+        resetAt
+      };
+    }
+    const limit = user.customMonthlyQuota ?? this.getDefaultFreeMonthlyQuota();
+    const remaining = Math.max(0, limit - used);
+    const percent = limit > 0 ? Math.round((used / limit) * 100) : 100;
+    const exceeded = used >= limit;
+    const warning = !exceeded && limit > 0 && used / limit >= 0.8;
+    const status: PlanQuotaStatus['status'] = exceeded ? 'exceeded' : warning ? 'warning' : 'ok';
+    return {
+      plan: 'free',
+      planExpiresAt: null,
+      month,
+      used,
+      limit,
+      remaining,
+      percent,
+      status,
+      warning,
+      exceeded,
+      resetAt
+    };
+  }
+
+  getUserPlanStatus(userId: string, now = Date.now()): PlanQuotaStatus | null {
+    const expired = this.db.prepare(
+      "SELECT 1 FROM users WHERE id=? AND plan='pro' AND plan_expires_at IS NOT NULL AND plan_expires_at<=?"
+    ).get(userId, now);
+    if (expired) {
+      this.tx(() => this._downgradeExpiredProUsers(now, userId));
+    }
+    return this._buildUserPlanStatus(userId, now);
+  }
+
+  grantUserPlan(userId: string, input: {
+    plan: 'free' | 'pro';
+    durationDays?: number | null;
+    source: string;
+    externalRef?: string | null;
+    actorUserId?: string;
+    now?: number;
+  }): PlanQuotaStatus | null {
+    return this.tx(() => {
+      const now = input.now ?? Date.now();
+      this._downgradeExpiredProUsers(now, userId);
+      const user = this.findUserById(userId);
+      if (!user) return null;
+      let newExpiresAt: number | null = null;
+      if (input.plan === 'pro' && input.durationDays !== null && input.durationDays !== undefined) {
+        const base = user.plan === 'pro' && user.planExpiresAt ? Math.max(now, user.planExpiresAt) : now;
+        newExpiresAt = base + input.durationDays * day;
+      }
+      this.db.prepare('UPDATE users SET plan=?, plan_expires_at=? WHERE id=?').run(input.plan, newExpiresAt, userId);
+      this.audit('plan_updated', {
+        source: input.source,
+        previousPlan: user.plan,
+        newPlan: input.plan,
+        durationDays: input.durationDays ?? null,
+        newExpiresAt: newExpiresAt ? new Date(newExpiresAt).toISOString() : null,
+        ...(input.externalRef ? { externalRef: input.externalRef } : {}),
+        ...(input.actorUserId ? { actorUserId: input.actorUserId } : {})
+      }, userId);
+      return this._buildUserPlanStatus(userId, now);
+    });
+  }
+
+  createRedeemCode(createdBy: string, options: {
+    tier: RedeemTier;
+    maxUses?: number;
+    expiresInDays?: number;
+    note?: string;
+    now?: number;
+  }): { code: string; prefix: string; tier: RedeemTier; durationDays: number | null; maxUses: number; expiresAt: string | null } {
+    return this.tx(() => {
+      const now = options.now ?? Date.now();
+      const code = generateProCode();
+      const prefix = code.slice(0, 9);
+      const durationDays = tierDurationDays[options.tier];
+      const maxUses = Math.max(1, Math.min(10000, options.maxUses ?? 1));
+      const expiresAt = options.expiresInDays ? now + options.expiresInDays * day : null;
+      this.db.prepare(
+        'INSERT INTO redeem_codes(code_hash,code_prefix,plan,tier,duration_days,note,max_uses,used_count,expires_at,revoked,created_by,created_at) VALUES(?,?,?,?,?,?,?,0,?,0,?,?)'
+      ).run(hash(code), prefix, 'pro', options.tier, durationDays, options.note ?? null, maxUses, expiresAt, createdBy, now);
+      this.audit('redeem_code_created', { prefix, tier: options.tier, durationDays, maxUses }, createdBy);
+      return {
+        code,
+        prefix,
+        tier: options.tier,
+        durationDays,
+        maxUses,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null
+      };
+    });
+  }
+
+  revokeRedeemCode(codeHash: string, actorUserId?: string): boolean {
+    return this.tx(() => {
+      const row = this.db.prepare('SELECT code_prefix FROM redeem_codes WHERE code_hash=? AND revoked=0')
+        .get(codeHash) as { code_prefix: string } | undefined;
+      if (!row) return false;
+      this.db.prepare('UPDATE redeem_codes SET revoked=1 WHERE code_hash=?').run(codeHash);
+      this.audit('redeem_code_revoked', { prefix: row.code_prefix }, actorUserId);
+      return true;
+    });
+  }
+
+  redeemProCode(userId: string, rawCode: string, now = Date.now()): RedeemResult {
+    return this.tx(() => {
+      this._downgradeExpiredProUsers(now, userId);
+      const user = this.findUserById(userId);
+      if (!user) return { status: 'user_not_found' };
+
+      const normalized = rawCode.trim().toUpperCase();
+      if (!normalized) return { status: 'invalid' };
+      const codeHash = hash(normalized);
+
+      const codeRow = this.db.prepare('SELECT * FROM redeem_codes WHERE code_hash=?')
+        .get(codeHash) as {
+          code_hash: string; code_prefix: string; tier: string; duration_days: number | null;
+          max_uses: number; used_count: number; expires_at: number | null; revoked: number;
+        } | undefined;
+      if (!codeRow) return { status: 'invalid' };
+
+      const already = this.db.prepare('SELECT 1 FROM redeem_redemptions WHERE code_hash=? AND user_id=?')
+        .get(codeHash, userId);
+      if (already) return { status: 'already_redeemed' };
+
+      if (codeRow.revoked) return { status: 'revoked' };
+      if (codeRow.expires_at !== null && Number(codeRow.expires_at) <= now) return { status: 'expired' };
+      if (Number(codeRow.used_count) >= Number(codeRow.max_uses)) return { status: 'exhausted' };
+
+      const tier = redeemTiers.some(t => t === codeRow.tier) ? (codeRow.tier as RedeemTier) : 'monthly';
+      const durationDays = codeRow.duration_days !== null && codeRow.duration_days !== undefined
+        ? Number(codeRow.duration_days)
+        : null;
+
+      if (user.plan === 'pro' && user.planExpiresAt === null && durationDays !== null) {
+        return { status: 'already_lifetime' };
+      }
+
+      const claimed = this.db.prepare(
+        'UPDATE redeem_codes SET used_count=used_count+1 WHERE code_hash=? AND revoked=0 AND used_count<max_uses AND (expires_at IS NULL OR expires_at>?)'
+      ).run(codeHash, now);
+      if (!claimed.changes) return { status: 'exhausted' };
+
+      const newExpiresAt = durationDays === null
+        ? null
+        : Math.max(now, user.plan === 'pro' && user.planExpiresAt ? user.planExpiresAt : now) + durationDays * day;
+
+      this.db.prepare("UPDATE users SET plan='pro', plan_expires_at=? WHERE id=?").run(newExpiresAt, userId);
+      this.db.prepare(
+        'INSERT INTO redeem_redemptions(code_hash,code_prefix,user_id,tier,duration_days,previous_plan,new_plan,new_expires_at,redeemed_at) VALUES(?,?,?,?,?,?,?,?,?)'
+      ).run(codeHash, codeRow.code_prefix, userId, tier, durationDays, user.plan, 'pro', newExpiresAt, now);
+
+      this.audit('redeem_code_redeemed', {
+        prefix: codeRow.code_prefix,
+        tier,
+        durationDays,
+        previousPlan: user.plan,
+        newExpiresAt: newExpiresAt ? new Date(newExpiresAt).toISOString() : null
+      }, userId);
+
+      return {
+        status: 'ok',
+        tier,
+        durationDays,
+        planQuota: this._buildUserPlanStatus(userId, now)!
+      };
+    });
+  }
+
+  userRedemptions(userId: string, limit = 20): RedeemHistoryRecord[] {
+    const rows = this.db.prepare(
+      'SELECT id,code_prefix,tier,duration_days,previous_plan,new_plan,new_expires_at,redeemed_at FROM redeem_redemptions WHERE user_id=? ORDER BY redeemed_at DESC, id DESC LIMIT ?'
+    ).all(userId, limit) as Record<string, unknown>[];
+    return rows.map(r => ({
+      id: Number(r.id),
+      codePrefix: String(r.code_prefix),
+      tier: (redeemTiers.some(t => t === r.tier) ? r.tier : 'monthly') as RedeemTier,
+      durationDays: r.duration_days !== null && r.duration_days !== undefined ? Number(r.duration_days) : null,
+      previousPlan: r.previous_plan === 'pro' ? 'pro' : 'free',
+      newPlan: r.new_plan === 'pro' ? 'pro' : 'free',
+      newExpiresAt: r.new_expires_at !== null && r.new_expires_at !== undefined ? new Date(Number(r.new_expires_at)).toISOString() : null,
+      redeemedAt: new Date(Number(r.redeemed_at)).toISOString()
+    }));
   }
 
   // --- Users & Identities ---
@@ -1082,13 +1395,24 @@ export class Store {
   }
 
   finish(id: string, status: string, output: string, result?: Update['result']) {
-    const row = this.db.prepare('SELECT user_id, created FROM tasks WHERE id=?').get(id) as { user_id: string | null; created: number } | undefined;
+    const row = this.db.prepare('SELECT user_id, op, status, created FROM tasks WHERE id=?')
+      .get(id) as { user_id: string | null; op: Op; status: string; created: number } | undefined;
     const now = Date.now();
     const durationMs = row ? Math.max(0, now - Number(row.created)) : null;
     this.db.prepare("UPDATE tasks SET status=?,changed=?,duration_ms=?,output=?,mcp_result=?,args='{}' WHERE id=?")
       .run(status, now, durationMs, output, result ? JSON.stringify(result) : null, id);
     this.db.prepare('UPDATE usage_events SET status=?,finished_at=?,duration_ms=? WHERE task_id=?')
       .run(status, now, durationMs, id);
+    if (
+      row?.user_id &&
+      !terminal.some(s => s === row.status) &&
+      (row.op === 'dc_call' || row.op === 'dc_resource') &&
+      (status === 'succeeded' || status === 'failed')
+    ) {
+      this.db.prepare(
+        'INSERT INTO usage_monthly(user_id,month,billable_calls,updated_at) VALUES(?,?,1,?) ON CONFLICT(user_id,month) DO UPDATE SET billable_calls=billable_calls+1, updated_at=excluded.updated_at'
+      ).run(row.user_id, utcMonthKey(now), now);
+    }
     this.audit('task_' + status, { id }, row?.user_id);
   }
 
@@ -1153,6 +1477,7 @@ export class Store {
       this.flushLiveSeen();
       const now = Date.now();
       this.flushLiveOAuthActivity(now);
+      this._downgradeExpiredProUsers(now);
       for (const t of this.db.prepare(`SELECT id,status FROM tasks WHERE status NOT IN ${doneSql} AND deadline<?`).all(now)) {
         this.finish(String(t.id), t.status === 'queued' ? 'timed_out' : 'interrupted',
           t.status === 'queued' ? 'Expired before dispatch.' : 'Agent result was not received. Check the device before retrying.');

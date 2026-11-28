@@ -224,6 +224,15 @@ function mcp(accessToken: string, userId?: string) {
     if (params.uri === reviewUri) return { contents: [{ uri: reviewUri, mimeType: reviewMime, text: reviewHtml }] };
     const device = selectedDevice();
     if (!store.catalog(device, userId).resources.some(resource => resource.uri === params.uri)) throw new Error('Unknown device resource.');
+    if (userId) {
+      const planQuota = store.getUserPlanStatus(userId);
+      if (planQuota?.exceeded) {
+        throw new Error(
+          `Monthly Free plan quota reached (${planQuota.used}/${planQuota.limit}). ` +
+          `Your paired devices remain connected; tool calls will resume on ${planQuota.resetAt} (UTC), or immediately after upgrading to Pro in /manage.`
+        );
+      }
+    }
     const submitted = store.submit(device, 'dc_resource', { uri: params.uri }, userId);
     const task = await waitForTask(submitted.id, signal);
     if (task.status !== 'succeeded' || !task.mcp_result) throw new Error('Resource is not ready. Retry the resource request.');
@@ -247,6 +256,7 @@ function mcp(accessToken: string, userId?: string) {
       }
       if (params.name === 'who_am_i') {
         z.strictObject({}).parse(arg);
+        const planQuota = userId ? store.getUserPlanStatus(userId) : null;
         const user = userId ? store.findUserById(userId) : null;
         const activeDevices = store.devices(userId).filter(device => !device.revoked);
         const onlineDevices = activeDevices.filter(device => device.online);
@@ -266,6 +276,7 @@ function mcp(accessToken: string, userId?: string) {
           username: user?.username ?? null,
           role: user?.role ?? 'admin',
           plan: user?.plan ?? 'free',
+          planExpiresAt: planQuota?.planExpiresAt ?? null,
           authMethods: user ? store.userAuthMethods(user.id) : [],
           devices: {
             paired: activeDevices.length,
@@ -276,8 +287,10 @@ function mcp(accessToken: string, userId?: string) {
           usage: {
             retainedCalls: store.totalCalls(userId),
             monthlyCalls,
+            billableMonthlyCalls: planQuota?.used ?? 0,
             activeTasks,
-            callQuota: user?.plan === 'pro' ? null : (user?.customMonthlyQuota ?? 10000),
+            callQuota: planQuota ? planQuota.limit : (user?.plan === 'pro' ? null : (user?.customMonthlyQuota ?? 10000)),
+            planQuota,
             softQuota
           },
           version: projectVersion
@@ -313,14 +326,33 @@ function mcp(accessToken: string, userId?: string) {
       }
       const coreTool = currentCatalog(undefined, userId).tools.find(tool => tool.name === params.name);
       if (coreTool) {
+        if (userId) {
+          const planQuota = store.getUserPlanStatus(userId);
+          if (planQuota?.exceeded) {
+            throw new Error(
+              `Monthly Free plan quota reached (${planQuota.used}/${planQuota.limit}). ` +
+              `Your paired devices remain connected; tool calls will resume on ${planQuota.resetAt} (UTC), or immediately after upgrading to Pro in /manage.`
+            );
+          }
+        }
         const id = selectedDevice(requestedDevice(arg));
         const { device_id, ...input } = arg;
         if (!store.catalog(id, userId).tools.some(tool => tool.name === params.name)) throw new Error('The selected device does not expose this tool.');
         const submitted = store.submit(id, 'dc_call', { tool: params.name, arguments: input }, userId);
         const task = await waitForTask(submitted.id, signal);
-        if (task.mcp_result) return JSON.parse(task.mcp_result);
+        const postQuota = userId ? store.getUserPlanStatus(userId) : null;
+        const quotaNotice = postQuota && (postQuota.warning || postQuota.exceeded) && postQuota.limit !== null
+          ? `[Quota Notice] Monthly Free plan usage: ${postQuota.used}/${postQuota.limit} (${postQuota.percent}%). Resets on ${postQuota.resetAt} (UTC). Upgrade to Pro in /manage for unlimited calls.`
+          : undefined;
+        if (task.mcp_result) {
+          const parsed = JSON.parse(task.mcp_result);
+          if (quotaNotice && Array.isArray(parsed.content)) {
+            return { ...parsed, content: [...parsed.content, { type: 'text' as const, text: quotaNotice }] };
+          }
+          return parsed;
+        }
         if (!terminal.some(status => status === task.status)) store.markBackground(submitted.id);
-        return result({ ...store.view(task), call_id: submitted.id });
+        return result({ ...store.view(task), call_id: submitted.id, ...(quotaNotice ? { quotaNotice } : {}) });
       }
       throw new Error('Unknown tool.');
     } catch (e) { return result({ error: errorText(e) }, true); }

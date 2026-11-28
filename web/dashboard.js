@@ -32,12 +32,19 @@ const panels = {
 
 let csrf = '';
 let currentSession = null;
+let currentPlanQuota = null;
 let devices = [];
 let auditRecords = [];
 let oauthClients = [];
 let usageData = null;
 let usageRange = '30d';
 let activePanel = 'devices';
+const tierLabels = {
+  monthly: 'Pro 月卡（30 天）',
+  quarterly: 'Pro 季卡（90 天）',
+  yearly: 'Pro 年卡（365 天）',
+  lifetime: 'Pro 永久卡'
+};
 let activeActivity = 'tasks';
 let activePromptCat = 'inspect';
 const promptTemplates = {
@@ -274,6 +281,7 @@ function showLogin() {
   pendingOnlineBaselineIds.clear();
   csrf = '';
   currentSession = null;
+  currentPlanQuota = null;
   usageData = null;
   byId('notice').hidden = true;
   byId('login-error').textContent = '';
@@ -360,68 +368,90 @@ function switchPanel(name) {
 }
 
 // --- Quota & Usage Rendering ---
-function renderQuotaAndUsage(monthlyCalls, softQuota = null) {
-  const isPro = currentSession?.plan === 'pro';
+function syncSessionPlanBadges(planQuota) {
+  if (!currentSession || !planQuota) return;
+  currentSession.plan = planQuota.plan;
+  currentSession.planExpiresAt = planQuota.planExpiresAt || null;
+  byId('sidebar-role').textContent = (planQuota.plan === 'pro' ? 'Pro' : 'Free') + (currentSession.role === 'admin' ? ' · Admin' : '');
+  const planDesc = planQuota.plan === 'pro'
+    ? (planQuota.planExpiresAt ? `Pro（有效期至 ${formatTime(planQuota.planExpiresAt)}）` : 'Pro (Unlimited)')
+    : `Free (${(planQuota.limit || FREE_QUOTA).toLocaleString()}/月)`;
+  byId('settings-meta').textContent = `角色：${currentSession.role === 'admin' ? '管理员' : '普通用户'} · 当前套餐：${planDesc}`;
+}
+
+function renderQuotaAndUsage(monthlyCalls, softQuota = null, planQuota = currentPlanQuota) {
+  if (planQuota) {
+    currentPlanQuota = planQuota;
+    syncSessionPlanBadges(planQuota);
+  }
+  const effectivePlan = planQuota ? planQuota.plan : currentSession?.plan;
+  const isPro = effectivePlan === 'pro';
+  const freeLimit = planQuota?.limit ?? FREE_QUOTA;
+  const freeUsed = planQuota && !isPro ? planQuota.used : monthlyCalls;
   const { label: resetLabel, daysLeft } = nextMonthResetLabel();
-  const pct = softQuota
+
+  const useSoft = !!softQuota;
+  const pct = useSoft
     ? softQuota.percent
     : isPro
       ? 0
-      : Math.min(100, Math.round((monthlyCalls / FREE_QUOTA) * 100));
-  const barWidth = softQuota
+      : (freeLimit > 0 ? Math.min(100, Math.round((freeUsed / freeLimit) * 100)) : 100);
+  const barWidth = useSoft
     ? `${Math.min(100, softQuota.percent)}%`
     : isPro
       ? '100%'
       : `${pct}%`;
-  const barClass = softQuota
+  const barClass = useSoft
     ? 'quota-fill' + (softQuota.status === 'exceeded' ? ' full' : softQuota.status === 'warning' ? ' warn' : '')
-    : 'quota-fill' + (!isPro && pct >= 100 ? ' full' : !isPro && pct >= 80 ? ' warn' : '');
+    : 'quota-fill' + (!isPro && (planQuota?.exceeded || pct >= 100) ? ' full' : !isPro && (planQuota?.warning || pct >= 80) ? ' warn' : '');
 
   // Sidebar quota card
-  byId('sidebar-quota-pct').textContent = softQuota ? `${softQuota.percent}%` : (isPro ? 'Pro' : `${pct}%`);
+  byId('sidebar-quota-pct').textContent = useSoft ? `${softQuota.percent}%` : (isPro ? 'Pro' : `${pct}%`);
   const sFill = byId('sidebar-quota-fill');
   sFill.style.width = barWidth;
   sFill.className = barClass;
-  byId('sidebar-quota-text').textContent = softQuota
+  byId('sidebar-quota-text').textContent = useSoft
     ? `${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()} 本月`
     : isPro
       ? `${monthlyCalls.toLocaleString()} 次 · Unlimited`
-      : `${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()} 本月`;
-  byId('sidebar-quota-reset').textContent = softQuota
+      : `${freeUsed.toLocaleString()} / ${freeLimit.toLocaleString()} 本月`;
+  byId('sidebar-quota-reset').textContent = useSoft
     ? `软配额提醒（不阻断）· ${resetLabel} 重置`
     : isPro
-      ? '无限次工具调用已启用'
-      : `将于 ${resetLabel} 重置`;
+      ? (planQuota?.planExpiresAt ? `有效期至 ${formatTime(planQuota.planExpiresAt)}` : '无限次工具调用已启用')
+      : `将于 ${resetLabel} 00:00 UTC 重置`;
   byId('sidebar-upgrade-btn').hidden = isPro;
 
   // Global top banner
   const banner = byId('quota-banner');
-  if (softQuota && softQuota.warning) {
+  if (!isPro && (planQuota?.exceeded || (!useSoft && pct >= 100))) {
+    banner.hidden = false;
+    banner.className = 'quota-banner full';
+    byId('quota-banner-text').textContent = `本月 Free 套餐 ${freeLimit.toLocaleString()} 次设备调用额度已用完（${freeUsed.toLocaleString()} / ${freeLimit.toLocaleString()}）。已配对设备仍保持在线，将于 ${resetLabel} 00:00 UTC 重置，或使用兑换码升级 Pro 立即恢复。`;
+  } else if (useSoft && softQuota.warning) {
     banner.hidden = false;
     banner.className = 'quota-banner' + (softQuota.status === 'exceeded' ? ' full' : '');
     byId('quota-banner-text').textContent = softQuota.status === 'exceeded'
       ? `本月工具调用已达软配额 ${softQuota.percent}%（${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}，仅告警不阻断调用），将于 ${resetLabel} 重置。`
       : `本月工具调用已达软配额 80% 提醒线（${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}，${softQuota.percent}%，仅告警不阻断调用），将于 ${resetLabel} 重置。`;
-  } else if (!softQuota && !isPro && pct >= 80) {
+  } else if (!isPro && (planQuota?.warning || pct >= 80)) {
     banner.hidden = false;
-    banner.className = 'quota-banner' + (pct >= 100 ? ' full' : '');
-    byId('quota-banner-text').textContent = pct >= 100
-      ? `本月 ${FREE_QUOTA.toLocaleString()} 次免费工具调用已用完，将于 ${resetLabel} 重置。`
-      : `本月免费工具调用已使用 ${pct}%（${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}），将于 ${resetLabel} 重置。`;
+    banner.className = 'quota-banner';
+    byId('quota-banner-text').textContent = `本月 Free 套餐调用额度已使用 ${pct}%（${freeUsed.toLocaleString()} / ${freeLimit.toLocaleString()}），将于 ${resetLabel} 00:00 UTC 重置。`;
   } else {
     banner.hidden = true;
   }
 
   // Usage primary KPI card
-  byId('usage-month-value').textContent = softQuota
+  byId('usage-month-value').textContent = useSoft
     ? `${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}`
     : isPro
       ? `${monthlyCalls.toLocaleString()} · Unlimited`
-      : `${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}`;
+      : `${freeUsed.toLocaleString()} / ${freeLimit.toLocaleString()}`;
   const uFill = byId('usage-quota-fill');
   uFill.style.width = barWidth;
   uFill.className = barClass;
-  byId('usage-month-sub').textContent = softQuota
+  byId('usage-month-sub').textContent = useSoft
     ? `软配额 ${softQuota.percent}%（不阻断调用）· ${resetLabel} 重置`
     : isPro
       ? '当前为 Pro 套餐，不限制月度调用次数'
@@ -438,6 +468,65 @@ function renderQuotaAndUsage(monthlyCalls, softQuota = null) {
   byId('plan-card-pro').classList.toggle('active-plan', isPro);
   byId('badge-plan-free').hidden = isPro;
   byId('badge-plan-pro').hidden = !isPro;
+
+  const freeUsageEl = byId('plan-free-usage');
+  if (freeUsageEl) {
+    freeUsageEl.textContent = !isPro
+      ? `当月有效设备调用：${freeUsed.toLocaleString()} / ${freeLimit.toLocaleString()} 次（${pct}%）`
+      : `包含每月 ${freeLimit.toLocaleString()} 次有效设备调用`;
+  }
+  const proExpiryEl = byId('plan-pro-expiry');
+  if (proExpiryEl) {
+    if (isPro) {
+      proExpiryEl.hidden = false;
+      proExpiryEl.textContent = planQuota?.planExpiresAt
+        ? `当前有效期至 ${formatTime(planQuota.planExpiresAt)}`
+        : '当前为永久 Pro，不限时长与调用次数';
+    } else {
+      proExpiryEl.hidden = true;
+      proExpiryEl.textContent = '';
+    }
+  }
+  const planBtn = byId('plan-upgrade-btn');
+  if (planBtn) {
+    planBtn.textContent = isPro ? '继续兑换延长 Pro 有效期' : '输入兑换码激活 Pro';
+  }
+}
+
+function renderRedemptions(items) {
+  const wrap = byId('redeem-history-wrap');
+  const container = byId('redeem-history');
+  if (!wrap || !container) return;
+  container.replaceChildren();
+  if (!items || !items.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  for (const item of items) {
+    const row = node('div', 'device-row');
+    const main = node('div', 'device-main');
+    const info = node('div', 'device-info');
+    const title = node('div', 'device-name');
+    title.append(
+      node('code', '', `${item.codePrefix}***`),
+      node('span', 'pill online', tierLabels[item.tier] || item.tier)
+    );
+    info.appendChild(title);
+    const expiryLabel = item.newExpiresAt ? `有效期至 ${formatTime(item.newExpiresAt)}` : '永久有效';
+    info.appendChild(node('div', 'device-meta', `核销于 ${formatTime(item.redeemedAt)} · ${expiryLabel}`));
+    main.appendChild(info);
+    row.appendChild(main);
+    container.appendChild(row);
+  }
+}
+
+async function refreshPlan() {
+  const res = await api('plan');
+  if (res.planQuota) {
+    renderQuotaAndUsage(res.planQuota.used ?? 0, null, res.planQuota);
+  }
+  renderRedemptions(res.redemptions || []);
 }
 
 function renderUsageChart(points) {
@@ -1107,10 +1196,12 @@ async function refresh() {
         notice(`设备「${onlineName}」已成功上线！`, false, { autoHideMs: 4000 });
       }
     }
-    renderQuotaAndUsage(overview.monthlyCalls ?? overview.totalCalls ?? 0, overview.softQuota ?? null);
+    renderQuotaAndUsage(overview.monthlyCalls ?? overview.totalCalls ?? 0, overview.softQuota ?? null, overview.planQuota ?? null);
     byId('last-refresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
     if (activePanel === 'usage') {
       await refreshUsage();
+    } else if (activePanel === 'plan') {
+      await refreshPlan();
     } else if (activePanel === 'activity') {
       if (activeActivity === 'tasks') await refreshTasks();
       else {
@@ -1312,9 +1403,47 @@ byId('copy-mcp').addEventListener('click', () => act(() => copyElement('mcp-url'
 byId('copy-overview-mcp').addEventListener('click', () => act(() => copyElement('overview-mcp-url', '已复制 MCP Server URL。')));
 byId('copy-task-id').addEventListener('click', () => act(() => copyElement('task-id', '已复制任务 ID。')));
 
-byId('sidebar-upgrade-btn').addEventListener('click', () => switchPanel('plan'));
-byId('banner-upgrade-btn').addEventListener('click', () => switchPanel('plan'));
-byId('plan-upgrade-btn').addEventListener('click', () => notice('兑换码自助升级将在 Issue #23 中上线，当前可由管理员在后台开通 Pro。'));
+byId('sidebar-upgrade-btn').addEventListener('click', () => { switchPanel('plan'); act(refresh); });
+byId('banner-upgrade-btn').addEventListener('click', () => { switchPanel('plan'); act(refresh); });
+byId('plan-upgrade-btn').addEventListener('click', () => {
+  const input = byId('redeem-code-input');
+  if (input) {
+    input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    input.focus();
+  }
+});
+byId('redeem-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const feedback = byId('redeem-feedback');
+  const input = byId('redeem-code-input');
+  const submitBtn = byId('redeem-submit-btn');
+  const code = (input?.value || '').trim();
+  if (!code) return;
+  act(async () => {
+    submitBtn.disabled = true;
+    feedback.className = 'subtle';
+    feedback.textContent = '正在核销兑换码…';
+    try {
+      const res = await api('plan/redeem', { code });
+      if (input) input.value = '';
+      if (res.planQuota) renderQuotaAndUsage(res.planQuota.used ?? 0, null, res.planQuota);
+      renderRedemptions(res.redemptions || []);
+      const tierText = tierLabels[res.tier] || 'Pro';
+      const msg = res.planQuota?.planExpiresAt
+        ? `已成功激活 ${tierText}，当前有效期至 ${formatTime(res.planQuota.planExpiresAt)}。`
+        : `已成功激活 ${tierText}，无限次调用已启用！`;
+      feedback.className = 'subtle';
+      feedback.textContent = msg;
+      notice(msg);
+      await refresh();
+    } catch (err) {
+      feedback.className = 'error';
+      feedback.textContent = err.message;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+});
 
 byId('cancel-task').addEventListener('click', () => act(async () => {
   await api('tasks/' + currentTask + '/cancel', {});

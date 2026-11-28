@@ -17,7 +17,8 @@ export type RateLimitBucket =
   | 'oauth_register'
   | 'google_activate'
   | 'device_start'
-  | 'device_pair';
+  | 'device_pair'
+  | 'redeem_code';
 
 export type RateLimitConfig = {
   trustProxy?: boolean;
@@ -31,7 +32,8 @@ const defaultRules: Record<RateLimitBucket, RateLimitRule> = {
   oauth_register: { max: 20, windowMs: 60 * 60_000 },
   google_activate: { max: 10, windowMs: 15 * 60_000 },
   device_start: { max: 20, windowMs: 15 * 60_000 },
-  device_pair: { max: 20, windowMs: 15 * 60_000 }
+  device_pair: { max: 20, windowMs: 15 * 60_000 },
+  redeem_code: { max: 10, windowMs: 15 * 60_000 }
 };
 
 function normalizeIp(raw: string | undefined): string {

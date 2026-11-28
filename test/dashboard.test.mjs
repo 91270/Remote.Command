@@ -8,6 +8,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { Dashboard } from '../dist/dashboard.js';
 import { OAuth } from '../dist/oauth.js';
+import { RateLimiter } from '../dist/rate-limit.js';
 import { Store } from '../dist/store.js';
 import { secret, hash } from '../dist/protocol.js';
 
@@ -75,6 +76,8 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /id="usage-success-rate"/);
     assert.match(html, /id="usage-avg-duration"/);
     assert.match(html, /id="task-purged-notice"/);
+    assert.match(html, /id="redeem-form"/);
+    assert.match(html, /id="redeem-code-input"/);
     assert.match(html, /class="tasks-table"/);
     assert.match(html, /class="audit-table"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
@@ -838,6 +841,81 @@ test('dashboard /manage/api/usage enforces tenant isolation, desensitization, an
     assert.ok(purgedTask.payloadPurgedAt);
     assert.equal(purgedTask.output, null);
     assert.equal(Object.hasOwn(purgedTask, 'result'), false);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('dashboard /manage/api/plan and /manage/api/plan/redeem enforce CSRF, rate limiting, and instant Free->Pro upgrade', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-plan-api-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const rateLimiter = new RateLimiter({ rules: { redeem_code: { max: 3, windowMs: 60_000 } } });
+  const adminRes = store.createGoogleUser({ sub: 'sub-p-admin', email: 'p-admin@example.com', displayName: 'Admin', avatarUrl: null, adminEmails: new Set() });
+  store.setRegistrationMode('open');
+  const userRes = store.createGoogleUser({ sub: 'sub-p-user', email: 'p-user@example.com', displayName: 'User', avatarUrl: null, adminEmails: new Set() });
+  const user = userRes.user;
+  const server = createServer(async (req, res) => {
+    try {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const d = new Dashboard(store, { origin, rateLimiter });
+      if (!await d.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
+    } catch { res.writeHead(500).end('Internal failure'); }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const token = secret();
+  const csrf = secret();
+  store.putAuth(token, 'dashboard', 3600000, { csrf, userId: user.id, username: user.email, role: user.role });
+  const callApi = (path, data, overrides = {}) => fetch(origin + '/manage' + path, {
+    ...(data !== undefined && { method: 'POST', body: JSON.stringify(data) }),
+    headers: {
+      Cookie: `rcm_dashboard=${token}`,
+      ...(data !== undefined && { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }),
+      ...overrides
+    }
+  });
+  try {
+    const plan1 = await (await callApi('/api/plan')).json();
+    assert.equal(plan1.planQuota.plan, 'free');
+    assert.equal(plan1.planQuota.limit, 10000);
+    assert.deepEqual(plan1.redemptions, []);
+
+    // CSRF protection
+    assert.equal((await callApi('/api/plan/redeem', { code: 'PRO-AAAAA-BBBBB-CCCCC' }, { 'X-CSRF-Token': secret() })).status, 403);
+
+    const validCode = store.createRedeemCode(adminRes.user.id, { tier: 'yearly', maxUses: 1 });
+
+    // Invalid attempts count against rate limit
+    assert.equal((await callApi('/api/plan/redeem', { code: 'PRO-BAD01-BAD02-BAD03' })).status, 400);
+    assert.equal((await callApi('/api/plan/redeem', { code: 'PRO-BAD04-BAD05-BAD06' })).status, 400);
+
+    // 3rd request succeeds and upgrades immediately
+    const okRes = await callApi('/api/plan/redeem', { code: validCode.code });
+    assert.equal(okRes.status, 200);
+    const okBody = await okRes.json();
+    assert.equal(okBody.ok, true);
+    assert.equal(okBody.tier, 'yearly');
+    assert.equal(okBody.durationDays, 365);
+    assert.equal(okBody.planQuota.plan, 'pro');
+    assert.ok(okBody.planQuota.planExpiresAt);
+    assert.equal(okBody.redemptions.length, 1);
+    assert.equal(okBody.redemptions[0].codePrefix, validCode.prefix);
+    assert.equal(JSON.stringify(okBody).includes(validCode.code), false);
+
+    // Session and overview reflect live Pro upgrade immediately
+    const sessionBody = await (await callApi('/api/session')).json();
+    assert.equal(sessionBody.plan, 'pro');
+    assert.ok(sessionBody.planExpiresAt);
+    const overviewBody = await (await callApi('/api/overview')).json();
+    assert.equal(overviewBody.planQuota.plan, 'pro');
+
+    // 4th attempt hits rate limit 429 with Retry-After
+    const rlRes = await callApi('/api/plan/redeem', { code: validCode.code });
+    assert.equal(rlRes.status, 429);
+    assert.ok(Number(rlRes.headers.get('retry-after')) >= 1);
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();
