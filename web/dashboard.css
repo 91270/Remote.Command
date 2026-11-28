@@ -508,8 +508,10 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   padding: 28px 40px 56px;
   max-width: 1060px;
   width: 100%;
+  min-width: 0;
   margin: 0 auto;
 }
+.panel { min-width: 0; }
 
 .quota-banner {
   margin-bottom: 20px;
@@ -557,6 +559,8 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   padding: 22px 24px;
   box-shadow: var(--shadow-sm);
   margin-bottom: 20px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .card-head {
@@ -570,9 +574,10 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
 .card-head h2 { margin: 0; font-size: 17px; letter-spacing: -0.015em; }
 .card-head p { margin: 3px 0 0; font-size: 13px; color: var(--text-secondary); }
 
-.heading-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.filters { display: flex; gap: 10px; margin-bottom: 14px; }
-.filters input, .filters select { max-width: 220px; padding: 7px 11px; font-size: 13px; }
+.heading-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; min-width: 0; }
+.card-head .filters { margin-bottom: 0; }
+.filters input, .filters select { max-width: 220px; min-width: 0; padding: 7px 11px; font-size: 13px; }
 
 /* --- Devices Row List --- */
 .device-list { display: flex; flex-direction: column; }
@@ -771,11 +776,44 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
 }
 
 /* --- Tables --- */
-.table-wrap { overflow-x: auto; }
+.table-wrap { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 11px 10px; border-bottom: 1px solid var(--border); }
 th { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 tbody tr:last-child td { border-bottom: none; }
+
+.audit-table { width: 100%; table-layout: fixed; }
+.audit-table th:nth-child(1),
+.audit-table td.audit-time { width: 168px; white-space: nowrap; vertical-align: top; }
+.audit-table th:nth-child(2),
+.audit-table td.audit-event { width: 210px; vertical-align: top; overflow-wrap: anywhere; word-break: break-word; }
+.audit-table td.audit-event code {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 12px;
+  background: var(--surface-subtle);
+  padding: 2px 7px;
+  border-radius: 7px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.audit-table td.audit-details-cell { vertical-align: top; min-width: 0; }
+.audit-details {
+  display: block;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tasks-table td.task-tool,
+.tasks-table td.task-device { overflow-wrap: anywhere; word-break: break-word; }
+.tasks-table td.task-status,
+.tasks-table td.task-time,
+.tasks-table td.task-action { white-space: nowrap; }
 
 /* --- Dialogs & Stepper --- */
 dialog {
@@ -968,8 +1006,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); 
 @media (max-width: 860px) {
   .login-view { grid-template-columns: 1fr; padding: 28px 20px; gap: 28px; }
   .login-card { margin: 0 auto; }
-  .app { grid-template-columns: 1fr; }
+  .app { grid-template-columns: minmax(0, 1fr); }
   .sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
   #console-main { padding: 20px 18px 40px; }
   .kpi-grid, .plan-grid, .prompt-grid, .usage-breakdown-grid { grid-template-columns: 1fr; }
+  .audit-table { min-width: 560px; }
+  .filters input, .filters select { max-width: none; flex: 1 1 160px; }
 }

@@ -824,14 +824,25 @@ async function refreshTasks() {
     const tr = document.createElement('tr');
     const devName = devices.find(d => d.id === t.device)?.name || t.device.slice(0, 8);
     tr.append(
-      node('td', '', t.toolName || t.operation),
-      node('td', '', devName),
-      (() => { const td = document.createElement('td'); td.appendChild(statePill(t.status)); return td; })(),
-      node('td', 'tabular', formatTime(t.createdAt)),
-      (() => { const td = document.createElement('td'); td.appendChild(button('查看', 'text-button', () => openTask(t.id))); return td; })()
+      node('td', 'task-tool', t.toolName || t.operation),
+      node('td', 'task-device', devName),
+      (() => { const td = node('td', 'task-status'); td.appendChild(statePill(t.status)); return td; })(),
+      node('td', 'tabular task-time', formatTime(t.createdAt)),
+      (() => { const td = node('td', 'task-action'); td.appendChild(button('查看', 'text-button', () => openTask(t.id))); return td; })()
     );
     tbody.appendChild(tr);
   }
+}
+
+function formatAuditDetails(details) {
+  if (details === null || details === undefined) return '—';
+  if (typeof details !== 'object') return String(details);
+  if (Array.isArray(details)) return JSON.stringify(details);
+  const entries = Object.entries(details);
+  if (!entries.length) return '{}';
+  return entries
+    .map(([key, val]) => `${key}: ${typeof val === 'string' ? val : JSON.stringify(val)}`)
+    .join(' · ');
 }
 
 function renderAudit() {
@@ -849,10 +860,14 @@ function renderAudit() {
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    const eventTd = node('td', 'audit-event');
+    eventTd.appendChild(node('code', '', r.event));
+    const detailsTd = node('td', 'audit-details-cell');
+    detailsTd.appendChild(node('code', 'audit-details', formatAuditDetails(r.details)));
     tr.append(
-      node('td', 'tabular', formatTime(r.at)),
-      node('td', '', r.event),
-      node('td', '', JSON.stringify(r.details))
+      node('td', 'tabular audit-time', formatTime(r.at)),
+      eventTd,
+      detailsTd
     );
     tbody.appendChild(tr);
   }

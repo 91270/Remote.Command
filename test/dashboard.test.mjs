@@ -75,7 +75,15 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /id="usage-success-rate"/);
     assert.match(html, /id="usage-avg-duration"/);
     assert.match(html, /id="task-purged-notice"/);
+    assert.match(html, /class="tasks-table"/);
+    assert.match(html, /class="audit-table"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
+    const dashboardCssRes = await request('/assets/dashboard.css');
+    assert.equal(dashboardCssRes.status, 200);
+    const dashboardCss = await dashboardCssRes.text();
+    assert.equal(dashboardCss.includes('grid-template-columns: minmax(0, 1fr)'), true);
+    assert.equal(dashboardCss.includes('overflow-wrap: anywhere'), true);
+    assert.equal(dashboardCss.includes('.audit-details'), true);
     const dashboardJsRes = await request('/assets/dashboard.js');
     assert.equal(dashboardJsRes.status, 200);
     const dashboardJs = await dashboardJsRes.text();
