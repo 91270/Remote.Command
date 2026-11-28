@@ -215,12 +215,26 @@ test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect
     const sh = await shRes.text();
     assert.match(sh, /ORIGIN="https:\/\/mcp\.example\.com"/);
     assert.match(sh, /--gateway "\$\{ORIGIN\}" --yes/);
+    assert.match(sh, /INSTALL_SERVICE="0"/);
+    assert.match(sh, /RCM_INSTALL_SERVICE/);
+    assert.match(sh, /--install-service/);
+
+    const shSvcRes = await fetch(localBase + '/install.sh?service=1');
+    assert.equal(shSvcRes.status, 200);
+    assert.match(await shSvcRes.text(), /INSTALL_SERVICE="1"/);
 
     const psRes = await fetch(localBase + '/install.ps1');
     assert.equal(psRes.status, 200);
     const ps = await psRes.text();
     assert.match(ps, /\$Origin = 'https:\/\/mcp\.example\.com'/);
     assert.match(ps, /--gateway \$Origin --yes/);
+    assert.match(ps, /\$InstallService = \$false/);
+    assert.match(ps, /RCM_INSTALL_SERVICE/);
+    assert.match(ps, /--install-service/);
+
+    const psSvcRes = await fetch(localBase + '/install.ps1?service=1');
+    assert.equal(psSvcRes.status, 200);
+    assert.match(await psSvcRes.text(), /\$InstallService = \$true/);
 
     const tgzRes = await fetch(localBase + '/install/agent.tgz', { redirect: 'manual' });
     assert.ok(tgzRes.status === 200 || tgzRes.status === 302);

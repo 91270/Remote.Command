@@ -664,6 +664,14 @@
       <button type="button" class="seg-btn os-tab" data-os="linux">Linux</button>
     </div>
 
+    <label class="service-toggle-row" for="device-install-service">
+      <input id="device-install-service" type="checkbox">
+      <span class="service-toggle-text">
+        <strong>注册为后台常驻服务（开机自启）</strong>
+        <small>配对成功后自动注册并启动系统用户后台服务（LaunchAgent / systemd / Task Scheduler），重启电脑自动重连。</small>
+      </span>
+    </label>
+
     <div id="os-panel-unix" class="method-box">
       <strong>快速安装启动 <span class="method-badge">推荐</span></strong>
       <p class="subtle">自动检测或下载便携版 Node.js 24（无需 sudo）并启动 Remote Agent。</p>

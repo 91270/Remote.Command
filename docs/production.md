@@ -158,7 +158,26 @@ shasum -a 256 -c remote-command-<version>-SHA256SUMS
 
 ## 5. Agent 安装与后台服务托管
 
-将 Agent 解包到当前用户管理的固定目录并按锁文件安装依赖，即可注册为系统用户级后台服务（开机/登录自启）：
+### 一键安装并启用后台常驻（推荐）
+
+首次通过 Gateway 安装脚本或 CLI 接入设备时，可直接附加 `--install-service`（Windows PowerShell 使用 `?service=1`），在配对完成后自动安装并启动当前用户级后台常驻服务，并打印可用的启停与状态管理命令：
+
+```sh
+# macOS / Linux
+curl -fsSL https://mcp.example.com/install.sh | bash -s -- --install-service
+
+# 或在已安装 CLI 中执行
+remote-command remote --gateway https://mcp.example.com --install-service
+```
+
+```powershell
+# Windows (PowerShell)
+irm 'https://mcp.example.com/install.ps1?service=1' | iex
+```
+
+### 手动解包与独立服务注册
+
+将 Agent 解包到当前用户管理的固定目录并按锁文件安装依赖，也可手动注册为系统用户级后台服务（开机/登录自启）：
 
 ### macOS / Linux
 

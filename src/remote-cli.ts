@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
-import { access, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, parse, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { runAgentCli } from './agent.js';
-import { runService } from './agent-service.js';
-import { resolveAgentConfig } from './agent-config.js';
+import { isStableServiceCliPath, runService } from './agent-service.js';
+import { loadConfig, resolveAgentConfig } from './agent-config.js';
 import { endpoint, errorText } from './protocol.js';
-import { deviceReport } from './client-commands.js';
+import { deviceReport, identity, identityFile } from './client-commands.js';
 import { inside } from './workspace.js';
 
 const help = `Usage: remote-command remote [options]
@@ -19,6 +19,7 @@ const help = `Usage: remote-command remote [options]
 
   --logout              Revoke this device and remove saved credentials.
   --report              Save a local diagnostics ZIP and exit.
+  --install-service     Pair if needed, register a persistent user background service, and start it.
   --no-persist-session  Pair for this run without saving credentials.
   --disable-no-sleep    Disable macOS keep-awake mode.
   -v, --verbose         Show expanded tool arguments and output previews.
@@ -37,6 +38,7 @@ const options = {
   help: { type: 'boolean', short: 'h' },
   logout: { type: 'boolean' },
   report: { type: 'boolean' },
+  'install-service': { type: 'boolean' },
   'no-persist-session': { type: 'boolean' },
   'disable-no-sleep': { type: 'boolean' },
   verbose: { type: 'boolean', short: 'v' },
@@ -108,6 +110,77 @@ export async function configureAgent(file: string, defaultConfig: boolean, prese
   } finally { rl?.close(); }
 }
 
+export type RemoteCliDeps = {
+  runAgent?: (argv: string[]) => Promise<void>;
+  runService?: (args: string[]) => Promise<void>;
+  configure?: typeof configureAgent;
+  loadConfig?: typeof loadConfig;
+  exists?: (filename: string) => Promise<boolean>;
+  readFile?: (filename: string, encoding: 'utf8') => Promise<string>;
+  report?: typeof deviceReport;
+  cliPath?: string;
+  homeDir?: string;
+};
+
+export async function runRemoteCommand(args: string[], deps: RemoteCliDeps = {}) {
+  const { values } = parseArgs({ args, options });
+  if (values.help) { console.log(help); return; }
+
+  const installService = Boolean(values['install-service']);
+  const maintenance = values.logout ? 'logout' : values.report ? 'report' : 'connect';
+  if (installService && values['no-persist-session']) {
+    throw new Error('--install-service cannot be combined with --no-persist-session.');
+  }
+  if (installService && maintenance !== 'connect') {
+    throw new Error('--install-service cannot be combined with --logout or --report.');
+  }
+  if (installService) {
+    const cliPath = deps.cliPath ?? await realpath(fileURLToPath(import.meta.url));
+    if (!isStableServiceCliPath(cliPath)) {
+      throw new Error('Install the package to a stable local path before registering a service.');
+    }
+  }
+
+  const explicit = values.config ?? process.env.RCM_AGENT_CONFIG;
+  const defaultFile = join(deps.homeDir ?? homedir(), '.remote-command', 'agent.json');
+  const file = explicit ? resolve(explicit) : defaultFile;
+  const checkExists = deps.exists ?? exists;
+  if (!await checkExists(file)) {
+    if (explicit && maintenance !== 'connect') throw new Error('Agent configuration not found: ' + file);
+    if (maintenance === 'logout') { console.log('This Agent has no saved identity.'); return; }
+    if (maintenance === 'report') { await (deps.report ?? deviceReport)(); return; }
+    await (deps.configure ?? configureAgent)(file, file === defaultFile, {
+      gateway: values.gateway,
+      workspace: values.workspace,
+      yes: values.yes
+    });
+  }
+
+  if (installService) {
+    const cfg = await (deps.loadConfig ?? loadConfig)(file);
+    const readText = deps.readFile ?? ((path: string, encoding: 'utf8') => readFile(path, encoding));
+    const rawIdentity = await readText(identityFile(cfg), 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
+    });
+    if (rawIdentity) {
+      const paired = identity.parse(JSON.parse(rawIdentity));
+      if (paired.origin !== cfg.origin) {
+        throw new Error('Existing device pairing is bound to another Gateway. Log out with --logout before pairing again.');
+      }
+      console.log(`Using existing device pairing: ${paired.id}`);
+    } else {
+      const loginArgs = ['login', file, ...(values['no-browser'] ? ['--no-browser'] : [])];
+      await (deps.runAgent ?? runAgentCli)(loginArgs);
+    }
+    await (deps.runService ?? runService)(['install', file]);
+    return;
+  }
+
+  const flags = ['no-persist-session', 'disable-no-sleep', 'verbose', 'log-file', 'debug', 'no-browser'] as const;
+  await (deps.runAgent ?? runAgentCli)([maintenance, file, ...flags.filter(flag => values[flag]).map(flag => '--' + flag)]);
+}
+
 async function main() {
   const [subcommand, ...args] = process.argv.slice(2);
   if (!subcommand || subcommand === '--help' || subcommand === '-h') {
@@ -117,25 +190,7 @@ async function main() {
   if (subcommand === 'agent') { await runAgentCli(args); return; }
   if (subcommand === 'service') { await runService(args); return; }
   if (subcommand !== 'remote') throw new Error('Unknown command. Run remote-command remote --help.');
-  const { values } = parseArgs({ args, options });
-  if (values.help) { console.log(help); return; }
-
-  const maintenance = values.logout ? 'logout' : values.report ? 'report' : 'connect';
-  const explicit = values.config ?? process.env.RCM_AGENT_CONFIG;
-  const defaultFile = join(homedir(), '.remote-command', 'agent.json');
-  const file = explicit ? resolve(explicit) : defaultFile;
-  if (!await exists(file)) {
-    if (explicit && maintenance !== 'connect') throw new Error('Agent configuration not found: ' + file);
-    if (maintenance === 'logout') { console.log('This Agent has no saved identity.'); return; }
-    if (maintenance === 'report') { await deviceReport(); return; }
-    await configureAgent(file, file === defaultFile, {
-      gateway: values.gateway,
-      workspace: values.workspace,
-      yes: values.yes
-    });
-  }
-  const flags = ['no-persist-session', 'disable-no-sleep', 'verbose', 'log-file', 'debug', 'no-browser'] as const;
-  await runAgentCli([maintenance, file, ...flags.filter(flag => values[flag]).map(flag => '--' + flag)]);
+  await runRemoteCommand(args);
 }
 
 if (process.argv[1] && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url) {

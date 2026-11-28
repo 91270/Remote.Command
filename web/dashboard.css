@@ -890,6 +890,36 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); 
   background: var(--bg);
   border: 1px solid var(--border);
 }
+.service-toggle-row {
+  margin-top: 12px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+.service-toggle-row input {
+  width: auto;
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+.service-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.service-toggle-text strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+.service-toggle-text small {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
 .method-badge {
   display: inline-block;
   font-size: 11px;

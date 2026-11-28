@@ -328,7 +328,16 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
   }
   function start(job: Work, cancel: boolean) {
     if (jobs.has(job.id) || pendingTerminals.has(job.id) || jobs.size >= maxActive) return;
-    const active: Active = { state: { id: job.id, status: 'running', seq: 1 }, abort: new AbortController() };
+    let initialCapability: Capability | undefined;
+    try { initialCapability = capability(job.op, job.args); } catch { /* validated in task body */ }
+    const approvalOutput = 'Confirm on the device (press y/n in the Agent terminal or use the Agent CLI). Approval expires after five minutes.';
+    const requiresApproval = !cancel && initialCapability !== undefined && needsLocalApproval(approvalMode, initialCapability);
+    const active: Active = {
+      state: requiresApproval
+        ? { id: job.id, status: 'awaiting_approval', seq: 1, output: approvalOutput }
+        : { id: job.id, status: 'running', seq: 1 },
+      abort: new AbortController()
+    };
     jobs.set(job.id, active);
     if (cancel) active.abort.abort();
     const startedAt = Date.now();
@@ -360,7 +369,7 @@ async function run(cfg: AgentConfig, auth: DeviceIdentity, opts: RunOptions) {
           const request = JSON.stringify(req);
           const pending = filename(cfg, job.id, 'pending'), decision = filename(cfg, job.id, 'decision');
           await writeFile(pending, request, { flag: 'wx', mode: 0o600 });
-          state('awaiting_approval', 'Confirm on the device (press y/n in the Agent terminal or use the Agent CLI). Approval expires after five minutes.');
+          state('awaiting_approval', approvalOutput);
           ui.toolAwaitingApproval(job.id, toolName);
           const cancelPrompt = enqueueForegroundApproval(job, request, pending, decision, signal);
           try {

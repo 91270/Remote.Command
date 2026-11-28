@@ -343,9 +343,7 @@ async function showApp(session) {
   byId('settings-meta').textContent = `角色：${session.role === 'admin' ? '管理员' : '普通用户'} · 当前套餐：${session.plan === 'pro' ? 'Pro (Unlimited)' : 'Free (10,000/月)'}`;
   byId('admin-nav-group').hidden = session.role !== 'admin';
 
-  const gateway = session.origin || location.origin;
-  byId('device-start-ps').textContent = 'irm ' + gateway + '/install.ps1 | iex';
-  byId('device-start-sh').textContent = 'curl -fsSL ' + gateway + '/install.sh | bash';
+  updateDeviceStartCommands();
   const mcpUrl = session.mcpUrl || location.origin + '/mcp';
   byId('mcp-url').textContent = mcpUrl;
   byId('overview-mcp-url').textContent = mcpUrl;
@@ -813,6 +811,23 @@ function renderDevices() {
 }
 
 // --- 3-Step Add Device & 2-Step Reconnect Dialog (with Auto Online Detection) ---
+function updateDeviceStartCommands() {
+  const gateway = currentSession?.origin || location.origin;
+  const installService = Boolean(byId('device-install-service')?.checked);
+  byId('device-start-ps').textContent = installService
+    ? "irm '" + gateway + "/install.ps1?service=1' | iex"
+    : 'irm ' + gateway + '/install.ps1 | iex';
+  byId('device-start-sh').textContent = installService
+    ? 'curl -fsSL ' + gateway + '/install.sh | bash -s -- --install-service'
+    : 'curl -fsSL ' + gateway + '/install.sh | bash';
+  const hint = byId('step-2-hint');
+  if (hint) {
+    hint.textContent = installService
+      ? '已复制！请在目标电脑终端（或 PowerShell）粘贴回车并完成浏览器配对，随后将自动注册并启动后台常驻服务。'
+      : '已复制！请打开目标电脑的终端（或 PowerShell），粘贴并按回车运行，保持窗口开启。';
+  }
+}
+
 function setDialogOS(os) {
   document.querySelectorAll('.os-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.os === os));
   byId('os-panel-windows').hidden = os !== 'windows';
@@ -875,6 +890,7 @@ function openDeviceDialog({ mode = 'add', device = null } = {}) {
   byId('start-enter-code').hidden = !!isReconnect;
   byId('other-connect-ways').hidden = !!isReconnect;
   byId('reconnect-live-pill').hidden = !isReconnect;
+  updateDeviceStartCommands();
   setDialogStep(1);
 
   const preferredOs = isReconnect && device.platform === 'win32'
@@ -1583,6 +1599,7 @@ byId('copy-device-sh').addEventListener('click', () => act(async () => {
   await copyElement('device-start-sh', '已复制 macOS / Linux 安装启动命令。');
   setDialogStep(2);
 }));
+byId('device-install-service')?.addEventListener('change', updateDeviceStartCommands);
 byId('copy-device-ps').addEventListener('click', () => act(async () => {
   await copyElement('device-start-ps', '已复制 Windows PowerShell 安装启动命令。');
   setDialogStep(2);

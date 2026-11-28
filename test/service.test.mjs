@@ -5,8 +5,8 @@ import { readFileSync } from 'node:fs';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { serviceDefinition } from '../dist/agent-service.js';
-import { configureAgent } from '../dist/remote-cli.js';
+import { formatServiceCommands, isStableServiceCliPath, serviceDefinition, serviceMetadata } from '../dist/agent-service.js';
+import { configureAgent, runRemoteCommand } from '../dist/remote-cli.js';
 import { approvalModes, needsLocalApproval } from '../dist/protocol.js';
 
 test('service manifests preserve paths and supervise the Agent as a regular user', () => {
@@ -104,6 +104,118 @@ test('configureAgent uses safe fallback workspace without local capability confi
   } finally {
     process.chdir(prevCwd);
     process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('service helpers validate stable CLI path and format lifecycle commands across platforms', () => {
+  assert.equal(isStableServiceCliPath('/Users/alice/.remote-command/client-0.5.3/dist/remote-cli.js'), true);
+  assert.equal(isStableServiceCliPath('/Users/alice/.npm/_npx/1234/node_modules/remote-command/dist/remote-cli.js'), false);
+  assert.equal(isStableServiceCliPath('C:\\Users\\alice\\AppData\\Local\\npm-cache\\_npx\\123\\remote-cli.js'), false);
+
+  const macMeta = serviceMetadata('darwin', '/Users/alice/.remote-command/agent.json');
+  assert.equal(macMeta.backend, 'LaunchAgent');
+  assert.ok(macMeta.label.startsWith('io.remote-command-agent-'));
+  assert.equal(serviceMetadata('linux', '/home/alice/.remote-command/agent.json').backend, 'systemd --user');
+  assert.equal(serviceMetadata('win32', 'C:\\Users\\Alice\\.remote-command\\agent.json').backend, 'Windows Task Scheduler');
+
+  const posixCmds = formatServiceCommands('/opt/rcm/dist/remote-cli.js', '/Users/alice/My Config/agent.json', '/usr/local/bin/node', 'darwin');
+  assert.match(posixCmds.status, /^\/usr\/local\/bin\/node \/opt\/rcm\/dist\/remote-cli\.js service status '\/Users\/alice\/My Config\/agent\.json'$/);
+  assert.match(posixCmds.stop, /service stop/);
+  assert.match(posixCmds.start, /service start/);
+  assert.match(posixCmds.remove, /service remove/);
+
+  const winCmds = formatServiceCommands('C:\\rcm\\dist\\remote-cli.js', 'C:\\Users\\Alice\\agent.json', 'C:\\Program Files\\node.exe', 'win32');
+  assert.match(winCmds.status, /"C:\\Program Files\\node\.exe" "C:\\rcm\\dist\\remote-cli\.js" service status "C:\\Users\\Alice\\agent\.json"/);
+});
+
+test('remote CLI --install-service validates conflicting flags, rejects _npx, and orchestrates login + service install', async () => {
+  const helpOut = spawnSync(process.execPath, [resolve('dist/remote-cli.js'), 'remote', '--help'], { encoding: 'utf8' });
+  assert.equal(helpOut.status, 0);
+  assert.match(helpOut.stdout, /--install-service/);
+
+  const conflictOut = spawnSync(process.execPath, [resolve('dist/remote-cli.js'), 'remote', '--install-service', '--no-persist-session'], { encoding: 'utf8' });
+  assert.equal(conflictOut.status, 1);
+  assert.match(conflictOut.stderr, /--no-persist-session/);
+
+  await assert.rejects(
+    () => runRemoteCommand(['--install-service', '--logout']),
+    /--logout or --report/
+  );
+  await assert.rejects(
+    () => runRemoteCommand(['--install-service', '--report']),
+    /--logout or --report/
+  );
+  await assert.rejects(
+    () => runRemoteCommand(['--install-service'], { cliPath: '/tmp/_npx/abc/dist/remote-cli.js' }),
+    /stable local path/
+  );
+
+  // Unpaired config: configures, logs in (preserving --no-browser), then installs service without entering foreground loop
+  const home = mkdtempSync(join(tmpdir(), 'rcm-remote-svc-'));
+  try {
+    const calls = [];
+    const fakeCfgPath = join(home, '.remote-command', 'agent.json');
+    const fakeStateDir = join(home, '.remote-command', 'device');
+    mkdirSync(fakeStateDir, { recursive: true });
+    let configPresent = false;
+    await runRemoteCommand(['--gateway', 'https://mcp.example.com', '--install-service', '--no-browser'], {
+      homeDir: home,
+      cliPath: '/Users/alice/.remote-command/client/dist/remote-cli.js',
+      exists: async () => configPresent,
+      configure: async (file, isDefault, preset) => {
+        calls.push(['configure', file, isDefault, preset.gateway]);
+        configPresent = true;
+      },
+      loadConfig: async (file) => ({
+        gateway: 'https://mcp.example.com',
+        origin: 'https://mcp.example.com',
+        workspace: join(home, 'RemoteCommand-Workspace'),
+        stateDir: fakeStateDir,
+        approvals: join(fakeStateDir, 'approvals'),
+        pendingResults: join(fakeStateDir, 'pending-results'),
+        allowInsecureLoopback: false,
+        noSleep: true,
+        logToFile: false
+      }),
+      runAgent: async (argv) => { calls.push(['agent', ...argv]); },
+      runService: async (argv) => { calls.push(['service', ...argv]); }
+    });
+    assert.deepEqual(calls, [
+      ['configure', fakeCfgPath, true, 'https://mcp.example.com'],
+      ['agent', 'login', fakeCfgPath, '--no-browser'],
+      ['service', 'install', fakeCfgPath]
+    ]);
+
+    // Already paired to matching origin: skips login and registers service directly
+    const pairedCalls = [];
+    writeFileSync(join(fakeStateDir, 'identity.json'), JSON.stringify({
+      origin: 'https://mcp.example.com',
+      id: '11111111-1111-4111-8111-111111111111',
+      credential: 'A'.repeat(43)
+    }));
+    await runRemoteCommand(['--install-service'], {
+      homeDir: home,
+      cliPath: '/Users/alice/.remote-command/client/dist/remote-cli.js',
+      exists: async () => true,
+      loadConfig: async () => ({
+        gateway: 'https://mcp.example.com',
+        origin: 'https://mcp.example.com',
+        workspace: join(home, 'RemoteCommand-Workspace'),
+        stateDir: fakeStateDir,
+        approvals: join(fakeStateDir, 'approvals'),
+        pendingResults: join(fakeStateDir, 'pending-results'),
+        allowInsecureLoopback: false,
+        noSleep: true,
+        logToFile: false
+      }),
+      runAgent: async (argv) => { pairedCalls.push(['agent', ...argv]); },
+      runService: async (argv) => { pairedCalls.push(['service', ...argv]); }
+    });
+    assert.deepEqual(pairedCalls, [
+      ['service', 'install', fakeCfgPath]
+    ]);
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });

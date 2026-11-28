@@ -16,8 +16,9 @@ function findBundledAgentTgz(): string | null {
   return null;
 }
 
-function renderShellInstaller(origin: string): string {
+function renderShellInstaller(origin: string, installService = false): string {
   const version = projectVersion;
+  const defaultInstallService = installService ? '1' : '0';
   return `#!/usr/bin/env bash
 set -euo pipefail
 
@@ -77,12 +78,28 @@ if [ ! -f "\${CLIENT_DIR}/dist/remote-cli.js" ]; then
   (cd "\${CLIENT_DIR}" && npm ci --omit=dev --ignore-scripts)
 fi
 
+INSTALL_SERVICE="${defaultInstallService}"
+if [ "\${RCM_INSTALL_SERVICE:-0}" = "1" ]; then
+  INSTALL_SERVICE="1"
+fi
+HAS_INSTALL_SERVICE_FLAG="0"
+for arg in "$@"; do
+  if [ "$arg" = "--install-service" ]; then
+    HAS_INSTALL_SERVICE_FLAG="1"
+    break
+  fi
+done
+
+if [ "$INSTALL_SERVICE" = "1" ] && [ "$HAS_INSTALL_SERVICE_FLAG" != "1" ]; then
+  exec "$NODE_BIN" "\${CLIENT_DIR}/dist/remote-cli.js" remote --gateway "\${ORIGIN}" --yes --install-service "$@"
+fi
 exec "$NODE_BIN" "\${CLIENT_DIR}/dist/remote-cli.js" remote --gateway "\${ORIGIN}" --yes "$@"
 `;
 }
 
-function renderPowerShellInstaller(origin: string): string {
+function renderPowerShellInstaller(origin: string, installService = false): string {
   const version = projectVersion;
+  const defaultInstallService = installService ? '$true' : '$false';
   return `$ErrorActionPreference = 'Stop'
 
 $Origin = '${origin}'
@@ -144,7 +161,13 @@ if (-not (Test-Path $CliPath)) {
   }
 }
 
-& $NodeBin $CliPath remote --gateway $Origin --yes @args
+$InstallService = ${defaultInstallService}
+if ($env:RCM_INSTALL_SERVICE -eq '1') { $InstallService = $true }
+if ($InstallService -and ($args -notcontains '--install-service')) {
+  & $NodeBin $CliPath remote --gateway $Origin --yes --install-service @args
+} else {
+  & $NodeBin $CliPath remote --gateway $Origin --yes @args
+}
 `;
 }
 
@@ -153,8 +176,9 @@ export class Installer {
 
   async route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
     if (req.method !== 'GET') return false;
+    const installService = url.searchParams.get('service') === '1' || url.searchParams.get('install_service') === '1';
     if (url.pathname === '/install.sh') {
-      const script = renderShellInstaller(this.origin);
+      const script = renderShellInstaller(this.origin, installService);
       res.writeHead(200, {
         'Content-Type': 'text/x-shellscript; charset=utf-8',
         'Cache-Control': 'no-store'
@@ -162,7 +186,7 @@ export class Installer {
       return true;
     }
     if (url.pathname === '/install.ps1') {
-      const script = renderPowerShellInstaller(this.origin);
+      const script = renderPowerShellInstaller(this.origin, installService);
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store'

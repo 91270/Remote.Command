@@ -158,6 +158,25 @@ You can also trigger the **CI & Release** GitHub Actions workflow manually with 
 
 ## 5. Agent Installation & Background Service
 
+### One-Step Install with Background Persistence (Recommended)
+
+When onboarding a device via the Gateway installer scripts or CLI, pass `--install-service` (or `?service=1` for Windows PowerShell) to automatically pair, register, and start the user-level background service and print copy-ready lifecycle commands:
+
+```sh
+# macOS / Linux
+curl -fsSL https://mcp.example.com/install.sh | bash -s -- --install-service
+
+# Or directly via an installed CLI
+remote-command remote --gateway https://mcp.example.com --install-service
+```
+
+```powershell
+# Windows (PowerShell)
+irm 'https://mcp.example.com/install.ps1?service=1' | iex
+```
+
+### Manual Tarball Install & Service Registration
+
 Extract the Agent package into a stable user-owned directory, install production dependencies, pair interactively, and register it as a user-level background service:
 
 ### macOS / Linux

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './agent-config.js';
 import { agentLock, identity, identityFile } from './client-commands.js';
@@ -13,6 +13,43 @@ const xml = (value: string) => value.replace(/[&<>"']/g, character => ({ '&': '&
 const systemd = (value: string) => '"' + value.replace(/[\\"]/g, '\\$&').replaceAll('%', '%%').replaceAll('$', () => '$$') + '"';
 const powershell = (value: string) => "'" + value.replaceAll("'", "''") + "'";
 const windows = (value: string) => '"' + value.replace(/(\\*)"/g, '$1$1\\"').replace(/\\+$/, '$&$&') + '"';
+
+function shellArg(value: string, platform: string): string {
+  if (platform === 'win32') return '"' + value.replaceAll('"', '\\"') + '"';
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+export function isStableServiceCliPath(cliPath: string): boolean {
+  return !cliPath.split(/[/\\]+/).includes('_npx');
+}
+
+export function serviceMetadata(platform: string, configFile: string) {
+  const normalized = platform === 'win32' ? configFile.toLowerCase() : configFile;
+  const id = agentClientId + '-' + hash(normalized).slice(0, 12).replace(/_/g, 'a');
+  const label = platform === 'darwin' ? 'io.' + id : id;
+  const backend = platform === 'darwin'
+    ? 'LaunchAgent'
+    : platform === 'win32'
+      ? 'Windows Task Scheduler'
+      : 'systemd --user';
+  return { id, label, backend };
+}
+
+export function formatServiceCommands(
+  cliPath: string,
+  configFile: string,
+  nodePath = process.execPath,
+  platform = process.platform
+) {
+  const prefix = `${shellArg(nodePath, platform)} ${shellArg(cliPath, platform)} service`;
+  const target = shellArg(configFile, platform);
+  return {
+    status: `${prefix} status ${target}`,
+    stop: `${prefix} stop ${target}`,
+    start: `${prefix} start ${target}`,
+    remove: `${prefix} remove ${target}`
+  };
+}
 
 export function serviceDefinition(platform: string, name: string, node: string, cli: string, file: string) {
   const args = [cli, 'agent', 'run', file, '--service', '--disable-no-sleep'];
@@ -68,22 +105,31 @@ export async function runService(args: string[]) {
   if (action === '--help' || action === '-h') { console.log(help); return; }
   if (args.length !== 2 || !action || !actions.includes(action) || !configFile) throw new Error(help);
   const cfgFile = await realpath(resolve(configFile));
-  const id = agentClientId + '-' + hash(process.platform === 'win32' ? cfgFile.toLowerCase() : cfgFile).slice(0, 12).replace(/_/g, 'a');
   const platform = process.platform;
-  const label = platform === 'darwin' ? 'io.' + id : id;
+  const { label, backend } = serviceMetadata(platform, cfgFile);
   const cli = await realpath(fileURLToPath(new URL('./remote-cli.js', import.meta.url)));
   const node = await realpath(process.execPath);
+  const cmds = formatServiceCommands(cli, cfgFile, node, platform);
   const definition = serviceDefinition(platform, label, node, cli, cfgFile);
   if (action === 'render') { process.stdout.write(definition); return; }
 
   if (action === 'install') {
-    if (cli.split(sep).some(part => part === '_npx')) throw new Error('Install the package to a stable local path before registering a service.');
+    if (!isStableServiceCliPath(cli)) throw new Error('Install the package to a stable local path before registering a service.');
     const cfg = await loadConfig(cfgFile);
     const paired = identity.parse(JSON.parse(await readFile(identityFile(cfg), 'utf8')));
     if (paired.origin !== cfg.origin) throw new Error('Pair the Agent with the configured Gateway first.');
     const release = await agentLock(cfg);
     await release();
   }
+
+  const printInstalledSummary = () => {
+    console.log(`✅ Background service installed and started (${backend}: ${label})`);
+    console.log(`   Config: ${cfgFile}`);
+    console.log(`   Status: ${cmds.status}`);
+    console.log(`   Stop:   ${cmds.stop}`);
+    console.log(`   Start:  ${cmds.start}`);
+    console.log(`   Remove: ${cmds.remove}`);
+  };
 
   if (platform === 'win32') {
     const task = '-TaskName ' + powershell(label);
@@ -97,6 +143,7 @@ export async function runService(args: string[]) {
     const shell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     const encoded = Buffer.from("$ErrorActionPreference = 'Stop'\n" + commands[action], 'utf16le').toString('base64');
     run(shell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]);
+    if (action === 'install') printInstalledSummary();
     return;
   }
 
@@ -111,7 +158,14 @@ export async function runService(args: string[]) {
 
   if (action === 'install') {
     await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-    await writeFile(file, definition, { flag: 'wx', mode: 0o600 });
+    try {
+      await writeFile(file, definition, { flag: 'wx', mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`Background service is already installed (${label}). Check status with: ${cmds.status} or remove it first with: ${cmds.remove}`);
+      }
+      throw error;
+    }
     try {
       if (mac) ctl('bootstrap', domain, file);
       else { ctl('daemon-reload'); ctl('enable', '--now', unit); }
@@ -119,6 +173,7 @@ export async function runService(args: string[]) {
       // Keep the registration file available for status or removal after a partial manager failure.
       throw new Error('Service registration failed. Check the manager output and remove the generated service before retrying.', { cause: error });
     }
+    printInstalledSummary();
   } else if (action === 'remove') {
     await readFile(file);
     if (mac) {
