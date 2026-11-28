@@ -23,7 +23,7 @@ function resolveDevicePreset(device) {
 const platformNames = { darwin: 'macOS', win32: 'Windows', linux: 'Linux', android: 'Android' };
 const panels = {
   devices: ['设备', '通过 Remote MCP 让 AI 客户端安全访问你的电脑。'],
-  usage: ['用量', '查看本月工具调用额度与近 6 个月趋势。'],
+  usage: ['用量', '查看当月与近 30 天调用趋势、工具排行、设备分布与软配额状态。'],
   plan: ['套餐与计费', '管理 Free（10,000 次/月）与 Pro（Unlimited）套餐权益。'],
   activity: ['任务与审计', '跟踪远程工具调用、本机审批与安全审计记录。'],
   settings: ['设置', '管理账号资料、外观主题与外部 OAuth 授权。'],
@@ -35,6 +35,8 @@ let currentSession = null;
 let devices = [];
 let auditRecords = [];
 let oauthClients = [];
+let usageData = null;
+let usageRange = '30d';
 let activePanel = 'devices';
 let activeActivity = 'tasks';
 let activePromptCat = 'inspect';
@@ -227,6 +229,20 @@ function nextMonthResetLabel() {
   return { label: `${next.getUTCMonth() + 1}月1日`, daysLeft };
 }
 
+function formatDuration(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.round((ms % 60000) / 1000);
+  return `${mins}m ${secs}s`;
+}
+
+function formatPercent(val) {
+  if (val === null || val === undefined || !Number.isFinite(val)) return '—';
+  return `${val}%`;
+}
+
 function statePill(state) {
   return node('span', 'pill ' + state, labels[state] || state);
 }
@@ -258,6 +274,7 @@ function showLogin() {
   pendingOnlineBaselineIds.clear();
   csrf = '';
   currentSession = null;
+  usageData = null;
   byId('notice').hidden = true;
   byId('login-error').textContent = '';
   const boot = byId('auth-boot');
@@ -343,77 +360,116 @@ function switchPanel(name) {
 }
 
 // --- Quota & Usage Rendering ---
-function renderQuotaAndUsage(totalCalls) {
+function renderQuotaAndUsage(monthlyCalls, softQuota = null) {
   const isPro = currentSession?.plan === 'pro';
   const { label: resetLabel, daysLeft } = nextMonthResetLabel();
-  const pct = isPro ? 0 : Math.min(100, Math.round((totalCalls / FREE_QUOTA) * 100));
+  const pct = softQuota
+    ? softQuota.percent
+    : isPro
+      ? 0
+      : Math.min(100, Math.round((monthlyCalls / FREE_QUOTA) * 100));
+  const barWidth = softQuota
+    ? `${Math.min(100, softQuota.percent)}%`
+    : isPro
+      ? '100%'
+      : `${pct}%`;
+  const barClass = softQuota
+    ? 'quota-fill' + (softQuota.status === 'exceeded' ? ' full' : softQuota.status === 'warning' ? ' warn' : '')
+    : 'quota-fill' + (!isPro && pct >= 100 ? ' full' : !isPro && pct >= 80 ? ' warn' : '');
 
   // Sidebar quota card
-  byId('sidebar-quota-pct').textContent = isPro ? 'Pro' : `${pct}%`;
+  byId('sidebar-quota-pct').textContent = softQuota ? `${softQuota.percent}%` : (isPro ? 'Pro' : `${pct}%`);
   const sFill = byId('sidebar-quota-fill');
-  sFill.style.width = isPro ? '100%' : `${pct}%`;
-  sFill.className = 'quota-fill' + (!isPro && pct >= 100 ? ' full' : !isPro && pct >= 80 ? ' warn' : '');
-  byId('sidebar-quota-text').textContent = isPro
-    ? `${totalCalls.toLocaleString()} 次 · Unlimited`
-    : `${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()} 本月`;
-  byId('sidebar-quota-reset').textContent = isPro ? '无限次工具调用已启用' : `将于 ${resetLabel} 重置`;
+  sFill.style.width = barWidth;
+  sFill.className = barClass;
+  byId('sidebar-quota-text').textContent = softQuota
+    ? `${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()} 本月`
+    : isPro
+      ? `${monthlyCalls.toLocaleString()} 次 · Unlimited`
+      : `${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()} 本月`;
+  byId('sidebar-quota-reset').textContent = softQuota
+    ? `软配额提醒（不阻断）· ${resetLabel} 重置`
+    : isPro
+      ? '无限次工具调用已启用'
+      : `将于 ${resetLabel} 重置`;
   byId('sidebar-upgrade-btn').hidden = isPro;
 
   // Global top banner
   const banner = byId('quota-banner');
-  if (!isPro && pct >= 80) {
+  if (softQuota && softQuota.warning) {
+    banner.hidden = false;
+    banner.className = 'quota-banner' + (softQuota.status === 'exceeded' ? ' full' : '');
+    byId('quota-banner-text').textContent = softQuota.status === 'exceeded'
+      ? `本月工具调用已达软配额 ${softQuota.percent}%（${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}，仅告警不阻断调用），将于 ${resetLabel} 重置。`
+      : `本月工具调用已达软配额 80% 提醒线（${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}，${softQuota.percent}%，仅告警不阻断调用），将于 ${resetLabel} 重置。`;
+  } else if (!softQuota && !isPro && pct >= 80) {
     banner.hidden = false;
     banner.className = 'quota-banner' + (pct >= 100 ? ' full' : '');
     byId('quota-banner-text').textContent = pct >= 100
       ? `本月 ${FREE_QUOTA.toLocaleString()} 次免费工具调用已用完，将于 ${resetLabel} 重置。`
-      : `本月免费工具调用已使用 ${pct}%（${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}），将于 ${resetLabel} 重置。`;
+      : `本月免费工具调用已使用 ${pct}%（${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}），将于 ${resetLabel} 重置。`;
   } else {
     banner.hidden = true;
   }
 
-  // Usage KPI cards
-  byId('usage-month-value').textContent = isPro
-    ? `${totalCalls.toLocaleString()} · Unlimited`
-    : `${totalCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}`;
+  // Usage primary KPI card
+  byId('usage-month-value').textContent = softQuota
+    ? `${softQuota.used.toLocaleString()} / ${softQuota.limit.toLocaleString()}`
+    : isPro
+      ? `${monthlyCalls.toLocaleString()} · Unlimited`
+      : `${monthlyCalls.toLocaleString()} / ${FREE_QUOTA.toLocaleString()}`;
   const uFill = byId('usage-quota-fill');
-  uFill.style.width = isPro ? '100%' : `${pct}%`;
-  uFill.className = sFill.className;
-  byId('usage-month-sub').textContent = isPro
-    ? '当前为 Pro 套餐，不限制月度调用次数'
-    : `已使用 ${pct}% · ${resetLabel} 重置（剩余 ${daysLeft} 天）`;
-  const dayOfMonth = Math.max(1, new Date().getUTCDate());
-  byId('usage-daily-avg').textContent = Math.round(totalCalls / dayOfMonth).toLocaleString();
+  uFill.style.width = barWidth;
+  uFill.className = barClass;
+  byId('usage-month-sub').textContent = softQuota
+    ? `软配额 ${softQuota.percent}%（不阻断调用）· ${resetLabel} 重置`
+    : isPro
+      ? '当前为 Pro 套餐，不限制月度调用次数'
+      : `已使用 ${pct}% · ${resetLabel} 重置（剩余 ${daysLeft} 天）`;
+
+  if (!usageData) {
+    const dayOfMonth = Math.max(1, new Date().getUTCDate());
+    byId('usage-daily-avg-sub').textContent = `本月日均 ${Math.round(monthlyCalls / dayOfMonth).toLocaleString()} 次/天`;
+    renderUsageChart([]);
+  }
 
   // Plan cards active state
   byId('plan-card-free').classList.toggle('active-plan', !isPro);
   byId('plan-card-pro').classList.toggle('active-plan', isPro);
   byId('badge-plan-free').hidden = isPro;
   byId('badge-plan-pro').hidden = !isPro;
-
-  renderUsageChart(totalCalls);
 }
 
-function renderUsageChart(currentMonthCalls) {
+function renderUsageChart(points) {
   const wrap = byId('usage-chart');
+  if (!wrap) return;
   wrap.replaceChildren();
-  const now = new Date();
-  const months = [];
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
-    months.push({ label: `${d.getUTCMonth() + 1}月`, value: i === 0 ? currentMonthCalls : 0 });
+
+  let items = Array.isArray(points) ? points : [];
+  if (!items.length) {
+    const now = new Date();
+    items = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+      items.push({ label: `${d.getUTCMonth() + 1}月`, calls: 0, succeeded: 0, failed: 0 });
+    }
   }
-  const maxVal = Math.max(10, ...months.map(m => m.value));
+
+  const maxVal = Math.max(10, ...items.map(m => Number(m.calls ?? m.value ?? 0)));
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
   svg.setAttribute('class', 'usage-svg');
-  svg.setAttribute('viewBox', '0 0 600 200');
+  svg.setAttribute('viewBox', '0 0 680 210');
 
-  const padL = 44, padB = 28, padT = 16, chartH = 200 - padT - padB, chartW = 600 - padL - 16;
+  const padL = 44, padB = 28, padT = 16, padR = 16;
+  const chartH = 210 - padT - padB;
+  const chartW = 680 - padL - padR;
+
   for (let i = 0; i <= 2; i++) {
     const y = padT + (chartH / 2) * i;
     const line = document.createElementNS(ns, 'line');
     line.setAttribute('x1', String(padL));
-    line.setAttribute('x2', String(600 - 16));
+    line.setAttribute('x2', String(680 - padR));
     line.setAttribute('y1', String(y));
     line.setAttribute('y2', String(y));
     svg.appendChild(line);
@@ -426,29 +482,129 @@ function renderUsageChart(currentMonthCalls) {
     svg.appendChild(lbl);
   }
 
-  const slotW = chartW / months.length;
-  const barW = Math.min(46, slotW * 0.48);
-  months.forEach((m, idx) => {
-    const h = m.value > 0 ? Math.max(6, (m.value / maxVal) * chartH) : 2;
+  const slotW = chartW / items.length;
+  const barW = Math.max(6, Math.min(46, slotW * 0.54));
+  const showEvery = items.length > 14 ? 5 : 1;
+
+  items.forEach((m, idx) => {
+    const count = Number(m.calls ?? m.value ?? 0);
+    const h = count > 0 ? Math.max(5, (count / maxVal) * chartH) : 2;
     const x = padL + idx * slotW + (slotW - barW) / 2;
     const y = padT + chartH - h;
     const rect = document.createElementNS(ns, 'rect');
-    rect.setAttribute('class', 'bar');
+    rect.setAttribute('class', 'bar' + (count === 0 ? ' zero' : ''));
     rect.setAttribute('x', String(x));
     rect.setAttribute('y', String(y));
     rect.setAttribute('width', String(barW));
     rect.setAttribute('height', String(h));
+
+    const title = document.createElementNS(ns, 'title');
+    const periodLabel = m.date || m.month || m.label;
+    title.textContent = `${periodLabel}: ${count} 次调用（成功 ${m.succeeded ?? 0} / 失败 ${m.failed ?? 0}）`;
+    rect.appendChild(title);
     svg.appendChild(rect);
 
-    const xText = document.createElementNS(ns, 'text');
-    xText.setAttribute('x', String(x + barW / 2));
-    xText.setAttribute('y', String(200 - 8));
-    xText.setAttribute('text-anchor', 'middle');
-    xText.textContent = m.label;
-    svg.appendChild(xText);
+    if (idx % showEvery === 0 || idx === items.length - 1) {
+      const xText = document.createElementNS(ns, 'text');
+      xText.setAttribute('x', String(x + barW / 2));
+      xText.setAttribute('y', String(210 - 8));
+      xText.setAttribute('text-anchor', 'middle');
+      xText.textContent = m.label;
+      svg.appendChild(xText);
+    }
   });
 
   wrap.appendChild(svg);
+}
+
+function renderUsageRankList(containerId, items, emptyText, renderRow) {
+  const container = byId(containerId);
+  if (!container) return;
+  container.replaceChildren();
+  if (!items || !items.length) {
+    container.appendChild(node('div', 'empty-state', emptyText));
+    return;
+  }
+  const maxCalls = Math.max(1, ...items.map(i => Number(i.calls || 0)));
+  for (const item of items) {
+    container.appendChild(renderRow(item, maxCalls));
+  }
+}
+
+function renderUsagePanel(data) {
+  if (!data || !data.summary) return;
+  const s = data.summary;
+  renderQuotaAndUsage(s.monthCalls ?? 0, data.softQuota ?? null);
+
+  byId('usage-30d-value').textContent = Number(s.last30dCalls ?? 0).toLocaleString();
+  byId('usage-daily-avg-sub').textContent = `本月日均 ${Number(s.dailyAverageMonth ?? 0).toLocaleString()} 次/天`;
+  byId('usage-success-rate').textContent = formatPercent(s.successRate30d);
+  byId('usage-success-sub').textContent = s.terminalCalls30d > 0
+    ? `成功 ${s.succeededCalls30d.toLocaleString()} / 已结束 ${s.terminalCalls30d.toLocaleString()}`
+    : '暂无已结束调用';
+  byId('usage-avg-duration').textContent = formatDuration(s.avgDurationMs30d);
+  byId('usage-duration-sub').textContent = s.activeTasks > 0
+    ? `当前 ${s.activeTasks} 个进行中任务 · 仅统计元数据`
+    : '仅统计脱敏元数据';
+
+  const subtitle = byId('usage-trend-subtitle');
+  if (usageRange === '6m') {
+    if (subtitle) subtitle.textContent = '近 6 个月按月统计（不含敏感参数与结果正文）';
+    renderUsageChart(data.monthlyTrend || []);
+  } else {
+    if (subtitle) subtitle.textContent = '近 30 天按日统计（不含敏感参数与结果正文）';
+    renderUsageChart(data.dailyTrend || []);
+  }
+
+  renderUsageRankList('usage-top-tools', data.topTools || [], '近 30 天暂无工具调用记录。', (item, maxCalls) => {
+    const row = node('div', 'usage-rank-item');
+    const head = node('div', 'usage-rank-head');
+    const nameWrap = node('div', 'usage-rank-name');
+    nameWrap.appendChild(node('code', '', item.toolName));
+    head.append(nameWrap, node('span', 'usage-rank-count tabular', `${item.calls.toLocaleString()} 次`));
+
+    const bar = node('div', 'usage-rank-bar');
+    const fill = node('div', 'usage-rank-fill');
+    fill.style.width = `${Math.max(4, Math.round((item.calls / maxCalls) * 100))}%`;
+    bar.appendChild(fill);
+
+    const meta = node(
+      'div',
+      'usage-rank-meta',
+      `成功率 ${formatPercent(item.successRate)} · 平均耗时 ${formatDuration(item.avgDurationMs)}`
+    );
+    row.append(head, bar, meta);
+    return row;
+  });
+
+  renderUsageRankList('usage-devices', data.deviceDistribution || [], '近 30 天暂无设备调用记录。', (item, maxCalls) => {
+    const row = node('div', 'usage-rank-item');
+    const head = node('div', 'usage-rank-head');
+    const nameWrap = node('div', 'usage-rank-name');
+    const label = item.deviceName || `已移除设备 (${String(item.deviceId || '').slice(0, 8)})`;
+    nameWrap.appendChild(node('strong', '', label));
+    if (item.deleted) nameWrap.appendChild(node('span', 'pill', '已删除'));
+    else if (item.revoked) nameWrap.appendChild(node('span', 'pill revoked', '已撤销'));
+    head.append(nameWrap, node('span', 'usage-rank-count tabular', `${item.calls.toLocaleString()} 次 · ${item.sharePercent}%`));
+
+    const bar = node('div', 'usage-rank-bar');
+    const fill = node('div', 'usage-rank-fill');
+    fill.style.width = `${Math.max(4, Math.round((item.calls / maxCalls) * 100))}%`;
+    bar.appendChild(fill);
+
+    const meta = node(
+      'div',
+      'usage-rank-meta',
+      `成功率 ${formatPercent(item.successRate)} · 平均耗时 ${formatDuration(item.avgDurationMs)}`
+    );
+    row.append(head, bar, meta);
+    return row;
+  });
+}
+
+async function refreshUsage() {
+  usageData = await api('usage');
+  renderUsagePanel(usageData);
 }
 
 // --- Devices Rendering ---
@@ -925,9 +1081,11 @@ async function refresh() {
         notice(`设备「${onlineName}」已成功上线！`, false, { autoHideMs: 4000 });
       }
     }
-    renderQuotaAndUsage(overview.totalCalls || 0);
+    renderQuotaAndUsage(overview.monthlyCalls ?? overview.totalCalls ?? 0, overview.softQuota ?? null);
     byId('last-refresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    if (activePanel === 'activity') {
+    if (activePanel === 'usage') {
+      await refreshUsage();
+    } else if (activePanel === 'activity') {
       if (activeActivity === 'tasks') await refreshTasks();
       else {
         const res = await api('audit');
@@ -994,6 +1152,19 @@ document.querySelectorAll('.prompt-cat').forEach(btn => {
       tab.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
     renderPromptLibrary();
+  });
+});
+
+document.querySelectorAll('.usage-range-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    usageRange = btn.dataset.usageRange === '6m' ? '6m' : '30d';
+    document.querySelectorAll('.usage-range-btn').forEach(tab => {
+      const selected = tab === btn;
+      tab.classList.toggle('active', selected);
+      tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+    if (usageData) renderUsagePanel(usageData);
+    else act(refreshUsage);
   });
 });
 

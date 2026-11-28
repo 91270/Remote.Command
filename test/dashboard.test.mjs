@@ -70,6 +70,10 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /data-prompt-cat="ops"/);
     assert.match(html, /id="chatgpt-troubleshoot"/);
     assert.match(html, /id="chatgpt-custom-instructions"/);
+    assert.match(html, /id="usage-top-tools"/);
+    assert.match(html, /id="usage-devices"/);
+    assert.match(html, /id="usage-success-rate"/);
+    assert.match(html, /id="usage-avg-duration"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     const dashboardJsRes = await request('/assets/dashboard.js');
     assert.equal(dashboardJsRes.status, 200);
@@ -721,6 +725,96 @@ test('dashboard sets approvalMode at invite/pairing time and switches it live pe
     const audit = await (await asAlice('/api/audit')).json();
     assert.equal(audit.records.some(r => r.event === 'device_approval_mode_updated' && r.details.approvalMode === 'client'), true);
     assert.equal(audit.records.some(r => r.event === 'device_policy_updated' && r.details.approvalMode === 'exec-only'), true);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('dashboard /manage/api/usage enforces tenant isolation, desensitization, and 80% monthly soft quota alerts', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-usage-api-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const aliceRes = store.createGoogleUser({ sub: 'sub-alice-u', email: 'alice-u@example.com', displayName: 'Alice', avatarUrl: null, adminEmails: new Set() });
+  store.setRegistrationMode('open');
+  const bobRes = store.createGoogleUser({ sub: 'sub-bob-u', email: 'bob-u@example.com', displayName: 'Bob', avatarUrl: null, adminEmails: new Set() });
+  const alice = aliceRes.user;
+  const bob = bobRes.user;
+  const server = createServer(async (req, res) => {
+    try {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const d = new Dashboard(store, { origin, monthlySoftQuota: 5 });
+      if (!await d.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
+    } catch { res.writeHead(500).end('Internal failure'); }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const session = user => {
+    const token = secret();
+    const csrf = secret();
+    store.putAuth(token, 'dashboard', 3600000, { csrf, userId: user.id, username: user.email, role: user.role });
+    return path => fetch(origin + '/manage' + path, { headers: { Cookie: `rcm_dashboard=${token}` } });
+  };
+  const asAlice = session(alice);
+  const asBob = session(bob);
+  try {
+    assert.equal((await fetch(origin + '/manage/api/usage')).status, 401);
+
+    const devA = store.pair(store.invite('Alice-Mac', ['read', 'write'], alice.id), secret());
+    const devB = store.pair(store.invite('Bob-PC', ['read'], bob.id), secret());
+    store.sync(devA.id, randomUUID(), 'darwin', []);
+    store.sync(devB.id, randomUUID(), 'win32', []);
+
+    // 3 calls (< 80% of 5)
+    for (let i = 0; i < 3; i++) {
+      const task = store.submit(devA.id, 'dc_call', { tool: 'read_file', arguments: { path: `/secret/file-${i}.txt` } }, alice.id);
+      store.finish(task.id, 'succeeded', `SENSITIVE_RESULT_${i}`);
+    }
+    const taskB = store.submit(devB.id, 'dc_call', { tool: 'list_directory', arguments: { path: '/bob' } }, bob.id);
+    store.finish(taskB.id, 'failed', 'BOB_FAILURE');
+
+    const okUsage = await (await asAlice('/api/usage')).json();
+    assert.equal(okUsage.summary.monthCalls, 3);
+    assert.equal(okUsage.summary.successRate30d, 100);
+    assert.equal(okUsage.softQuota.status, 'ok');
+    assert.equal(okUsage.softQuota.warning, false);
+    assert.equal(okUsage.softQuota.blocking, false);
+    const serialized = JSON.stringify(okUsage);
+    assert.equal(serialized.includes('SENSITIVE_RESULT'), false);
+    assert.equal(serialized.includes('/secret/file'), false);
+    assert.equal(serialized.includes('BOB_FAILURE'), false);
+    assert.equal(serialized.includes(devB.id), false);
+
+    // 4th call reaches 80% soft warning threshold
+    const task4 = store.submit(devA.id, 'dc_call', { tool: 'write_file', arguments: { path: '/secret/w.txt', content: 'hi' } }, alice.id);
+    store.finish(task4.id, 'succeeded', 'ok');
+    const warnOverview = await (await asAlice('/api/overview')).json();
+    assert.equal(warnOverview.monthlyCalls, 4);
+    assert.equal(warnOverview.softQuota.status, 'warning');
+    assert.equal(warnOverview.softQuota.percent, 80);
+    assert.equal(warnOverview.softQuota.warning, true);
+    assert.equal(warnOverview.softQuota.blocking, false);
+
+    // 5th call reaches 100% soft quota exceeded (still non-blocking)
+    const task5 = store.submit(devA.id, 'dc_call', { tool: 'read_file', arguments: { path: '/secret/5.txt' } }, alice.id);
+    store.finish(task5.id, 'failed', 'err');
+    const exceededUsage = await (await asAlice('/api/usage')).json();
+    assert.equal(exceededUsage.summary.monthCalls, 5);
+    assert.equal(exceededUsage.topTools[0].toolName, 'read_file');
+    assert.equal(exceededUsage.topTools[0].calls, 4);
+    assert.equal(exceededUsage.deviceDistribution[0].deviceId, devA.id);
+    assert.equal(exceededUsage.softQuota.status, 'exceeded');
+    assert.equal(exceededUsage.softQuota.percent, 100);
+    assert.equal(exceededUsage.softQuota.warning, true);
+    assert.equal(exceededUsage.softQuota.blocking, false);
+
+    // Bob's quota and usage remain isolated
+    const bobUsage = await (await asBob('/api/usage')).json();
+    assert.equal(bobUsage.summary.monthCalls, 1);
+    assert.equal(bobUsage.summary.failedCalls30d, 1);
+    assert.equal(bobUsage.softQuota.status, 'ok');
+    assert.deepEqual(bobUsage.deviceDistribution.map(d => d.deviceId), [devB.id]);
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();

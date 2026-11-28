@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Store } from '../dist/store.js';
+import { Store, evaluateMonthlySoftQuota } from '../dist/store.js';
 import { endpoint, secret, syncReply } from '../dist/protocol.js';
 
 test('store: invites, capability checks, lost responses, replacement, terminal acknowledgement and revocation', () => {
@@ -151,5 +151,136 @@ test('sync includes deviceName and owner userEmail on non-fast-path responses', 
     assert.equal(reply.deviceName, 'macbook-pro');
     assert.equal(reply.userEmail, 'owner@example.com');
     assert.deepEqual(reply.capabilities, ['read', 'exec']);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('schema v1->v2 migration backfills duration_ms and desensitized usage_events', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-v2-migrate-'));
+  const file = join(folder, 'gateway.sqlite');
+  let store = new Store(file);
+  try {
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    const created = store.createGoogleUser({
+      sub: 'sub-migrate-v2',
+      email: 'migrate@example.com',
+      displayName: 'Migrator',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(created.status, 'ok');
+    const dev = store.pair(store.invite('box', ['read'], created.user.id), secret());
+    store.sync(dev.id, randomUUID(), 'linux', []);
+    const t = store.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: '/secret/top.txt' } }, created.user.id);
+    store.finish(t.id, 'succeeded', 'SECRET_OUTPUT_CONTENT');
+
+    // Simulate a v1 database snapshot before closing
+    store.db.exec('DROP TABLE usage_events; ALTER TABLE tasks DROP COLUMN duration_ms; PRAGMA user_version = 1;');
+    store.db.close();
+
+    store = new Store(file);
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    const cols = store.db.prepare('PRAGMA table_info(usage_events)').all().map(c => c.name);
+    assert.equal(cols.includes('args'), false);
+    assert.equal(cols.includes('output'), false);
+    assert.equal(cols.includes('mcp_result'), false);
+
+    const migratedRow = store.db.prepare('SELECT * FROM usage_events WHERE task_id=?').get(t.id);
+    assert.equal(migratedRow.tool_name, 'read_file');
+    assert.equal(migratedRow.status, 'succeeded');
+    assert.ok(migratedRow.duration_ms >= 0);
+    assert.equal(store.monthlyCalls(created.user.id), 1);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('usageAnalytics aggregates trends, tools, devices and survives task retention cleanup, plus soft quota evaluation', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-usage-analytics-'));
+  const store = new Store(join(folder, 'gateway.sqlite'));
+  try {
+    const u = store.createGoogleUser({
+      sub: 'sub-usage',
+      email: 'usage@example.com',
+      displayName: 'Usage User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(u.status, 'ok');
+    const userId = u.user.id;
+    const dev1 = store.pair(store.invite('MacBook', ['read', 'write'], userId), secret());
+    const dev2 = store.pair(store.invite('Linux-VM', ['read', 'write', 'exec'], userId), secret());
+    store.sync(dev1.id, randomUUID(), 'darwin', []);
+    store.sync(dev2.id, randomUUID(), 'linux', []);
+
+    const t1 = store.submit(dev1.id, 'dc_call', { tool: 'read_file', arguments: { path: 'a.txt' } }, userId);
+    store.finish(t1.id, 'succeeded', 'ok-1');
+    const t2 = store.submit(dev1.id, 'dc_call', { tool: 'read_file', arguments: { path: 'b.txt' } }, userId);
+    store.finish(t2.id, 'failed', 'err-2');
+    const t3 = store.submit(dev2.id, 'dc_call', { tool: 'write_file', arguments: { path: 'c.txt' } }, userId);
+    store.finish(t3.id, 'succeeded', 'ok-3');
+    const t4 = store.submit(dev2.id, 'dc_call', { tool: 'start_process', arguments: { command: 'ls' } }, userId);
+    store.finish(t4.id, 'denied', 'denied-4');
+
+    // Revoke and delete dev2 to verify distribution falls back cleanly while keeping counts
+    assert.equal(store.revoke(dev2.id, userId), true);
+    assert.equal(store.deleteRevokedDevice(dev2.id, userId), true);
+
+    // Backdate t1 to 10 days ago (still in same month if now is 20th, and >7d task retention)
+    const now = Date.UTC(2026, 10, 20, 12, 0, 0);
+    const tenDaysAgo = now - 10 * 86400000;
+    const twoMonthsAgo = Date.UTC(2026, 8, 15, 10, 0, 0);
+    store.db.prepare('UPDATE tasks SET created=?, changed=?, duration_ms=? WHERE id=?').run(tenDaysAgo, tenDaysAgo + 250, 250, t1.id);
+    store.db.prepare('UPDATE usage_events SET created_at=?, finished_at=?, duration_ms=? WHERE task_id=?').run(tenDaysAgo, tenDaysAgo + 250, 250, t1.id);
+    store.db.prepare('UPDATE tasks SET created=?, changed=?, duration_ms=? WHERE id IN (?,?,?)').run(now - 3600000, now - 3599000, 1000, t2.id, t3.id, t4.id);
+    store.db.prepare('UPDATE usage_events SET created_at=?, finished_at=?, duration_ms=? WHERE task_id IN (?,?,?)').run(now - 3600000, now - 3599000, 1000, t2.id, t3.id, t4.id);
+
+    // Insert a historical event from 2 months ago directly into usage_events
+    store.db.prepare(
+      "INSERT INTO usage_events(task_id,user_id,device_id,tool_name,op,status,created_at,finished_at,duration_ms) VALUES(?,?,?,?,?,?,?,?,?)"
+    ).run(randomUUID(), userId, dev1.id, 'read_file', 'dc_call', 'succeeded', twoMonthsAgo, twoMonthsAgo + 100, 100);
+
+    // Run maintain(7): t1 should be purged from tasks, but usageAnalytics still retains it!
+    store.maintain(7);
+    assert.equal(store.task(t1.id, userId), undefined);
+
+    const analytics = store.usageAnalytics(userId, { now });
+    assert.equal(analytics.summary.monthCalls, 4);
+    assert.equal(analytics.summary.last30dCalls, 4);
+    assert.equal(analytics.summary.terminalCalls30d, 4);
+    assert.equal(analytics.summary.succeededCalls30d, 2);
+    assert.equal(analytics.summary.failedCalls30d, 1);
+    assert.equal(analytics.summary.deniedOrCancelledCalls30d, 1);
+    assert.equal(analytics.summary.successRate30d, 50);
+    assert.equal(analytics.summary.avgDurationMs30d, 813);
+    assert.equal(analytics.monthlyTrend.length, 6);
+    assert.equal(analytics.monthlyTrend[3].month, '2026-09');
+    assert.equal(analytics.monthlyTrend[3].calls, 1);
+    assert.equal(analytics.monthlyTrend[5].month, '2026-11');
+    assert.equal(analytics.monthlyTrend[5].calls, 4);
+    assert.equal(analytics.dailyTrend.length, 30);
+    assert.equal(analytics.topTools[0].toolName, 'read_file');
+    assert.equal(analytics.topTools[0].calls, 2);
+    assert.equal(analytics.deviceDistribution.length, 2);
+    const dev2Entry = analytics.deviceDistribution.find(d => d.deviceId === dev2.id);
+    assert.equal(dev2Entry.deleted, true);
+    assert.equal(dev2Entry.calls, 2);
+    assert.equal(dev2Entry.sharePercent, 50);
+
+    // Soft quota evaluator boundary checks
+    assert.equal(evaluateMonthlySoftQuota(10, null, now), null);
+    assert.equal(evaluateMonthlySoftQuota(10, 0, now), null);
+    const okQuota = evaluateMonthlySoftQuota(3, 5, now);
+    assert.equal(okQuota.status, 'ok');
+    assert.equal(okQuota.warning, false);
+    assert.equal(okQuota.blocking, false);
+    const warnQuota = evaluateMonthlySoftQuota(4, 5, now);
+    assert.equal(warnQuota.status, 'warning');
+    assert.equal(warnQuota.percent, 80);
+    assert.equal(warnQuota.warning, true);
+    assert.equal(warnQuota.blocking, false);
+    assert.match(warnQuota.message, /80% soft quota/);
+    const exceededQuota = evaluateMonthlySoftQuota(6, 5, now);
+    assert.equal(exceededQuota.status, 'exceeded');
+    assert.equal(exceededQuota.percent, 120);
+    assert.equal(exceededQuota.warning, true);
+    assert.equal(exceededQuota.blocking, false);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });

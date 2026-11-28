@@ -13,7 +13,7 @@ import { RotatingLogger } from './logger.js';
 import { OAuth } from './oauth.js';
 import { GoogleAuth } from './google-auth.js';
 import { RateLimiter, ipDigest } from './rate-limit.js';
-import { Store } from './store.js';
+import { Store, evaluateMonthlySoftQuota } from './store.js';
 import { Dashboard } from './dashboard.js';
 import { DeviceFlow } from './device-flow.js';
 import { dcCapability, endpoint, uuid, sync, errorText, terminal, catalog, projectVersion, secret } from './protocol.js';
@@ -51,9 +51,16 @@ function retention(value: string | undefined, fallback: number, max: number) {
   if (!Number.isSafeInteger(days) || days < 1 || days > max) throw new Error('Invalid retention in days.');
   return days;
 }
+function optionalPositiveInt(value: string | undefined, max: number, name: string): number | null {
+  if (value === undefined || value.trim() === '' || value.trim() === '0') return null;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 1 || n > max) throw new Error(`Invalid ${name}.`);
+  return n;
+}
 const taskDays = retention(env.RCM_TASK_RETENTION_DAYS, 7, 365);
 const auditDays = retention(env.RCM_AUDIT_RETENTION_DAYS, 90, 3650);
 const dcrClientDays = retention(env.RCM_DCR_CLIENT_TTL_DAYS, 30, 3650);
+const monthlySoftQuota = optionalPositiveInt(env.RCM_MONTHLY_SOFT_QUOTA, 10_000_000, 'RCM_MONTHLY_SOFT_QUOTA');
 const origin = endpoint(env.PUBLIC_ORIGIN ?? '', env.ALLOW_INSECURE_LOOPBACK === '1').origin;
 const bindHost = env.BIND_HOST ?? '127.0.0.1';
 if (origin.startsWith('http:') && bindHost !== '127.0.0.1') throw new Error('Plaintext test Gateway must bind to 127.0.0.1.');
@@ -120,7 +127,7 @@ const oauth = new OAuth(store, {
   rateLimiter
 });
 const deviceFlow = new DeviceFlow(store, origin, rateLimiter);
-const dashboard = new Dashboard(store, { origin, googleEnabled: true, rateLimiter }, deviceFlow);
+const dashboard = new Dashboard(store, { origin, googleEnabled: true, rateLimiter, monthlySoftQuota }, deviceFlow);
 const installer = new Installer(origin);
 const pinnedCatalog = catalog.parse(JSON.parse(readFileSync(new URL('../vendor/desktop-commander-full/catalog.json', import.meta.url), 'utf8')));
 const reviewUri = 'ui://remote-command/call-review.html';
@@ -243,6 +250,8 @@ function mcp(accessToken: string, userId?: string) {
         const activeTasks = Object.entries(taskCounts)
           .filter(([status]) => !terminal.some(value => value === status))
           .reduce((sum, [, count]) => sum + count, 0);
+        const monthlyCalls = store.monthlyCalls(userId);
+        const softQuota = evaluateMonthlySoftQuota(monthlyCalls, monthlySoftQuota);
         return result({
           user: user?.email ?? user?.username ?? 'private-owner',
           displayName: user?.displayName ?? null,
@@ -259,9 +268,10 @@ function mcp(accessToken: string, userId?: string) {
           },
           usage: {
             retainedCalls: store.totalCalls(userId),
-            monthlyCalls: store.monthlyCalls(userId),
+            monthlyCalls,
             activeTasks,
-            callQuota: user?.plan === 'pro' ? null : (user?.customMonthlyQuota ?? 10000)
+            callQuota: user?.plan === 'pro' ? null : (user?.customMonthlyQuota ?? 10000),
+            softQuota
           },
           version: projectVersion
         });

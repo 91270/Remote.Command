@@ -6,10 +6,12 @@ import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, c
 
 const day = 86400000;
 const dispatchMs = 16 * 60_000;
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const liveSql = "('dispatched','awaiting_approval','running')";
 const outstandingSql = "('queued','dispatched','awaiting_approval','running')";
 const doneSql = "('succeeded','failed','denied','cancelled','timed_out','interrupted')";
+const failedSql = "('failed','timed_out','interrupted')";
+const deniedOrCancelledSql = "('denied','cancelled')";
 const operationPlaceholders = names.map(() => '?').join(',');
 const normalizeApprovalMode = (raw: unknown): ApprovalMode =>
   typeof raw === 'string' && approvalModes.some(m => m === raw) ? (raw as ApprovalMode) : 'client';
@@ -34,8 +36,81 @@ type DeviceRow = {
 type TaskRow = {
   id: string; user_id: string | null; device: string; op: Op; args: string; status: string; boot: string | null;
   created: number; changed: number; deadline: number; cancel: number; output: string | null; seq: number;
-  mcp_result: string | null; tool_name: string | null;
+  mcp_result: string | null; tool_name: string | null; duration_ms?: number | null;
 };
+export type MonthlySoftQuotaStatus = {
+  limit: number;
+  used: number;
+  percent: number;
+  warningThresholdPercent: 80;
+  status: 'ok' | 'warning' | 'exceeded';
+  warning: boolean;
+  blocking: false;
+  resetAt: string;
+  message?: string;
+};
+export type UsageAnalytics = {
+  summary: {
+    monthCalls: number;
+    last30dCalls: number;
+    dailyAverageMonth: number;
+    terminalCalls30d: number;
+    succeededCalls30d: number;
+    failedCalls30d: number;
+    deniedOrCancelledCalls30d: number;
+    successRate30d: number | null;
+    avgDurationMs30d: number | null;
+    activeTasks: number;
+    resetAt: string;
+  };
+  monthlyTrend: { month: string; label: string; calls: number; succeeded: number; failed: number }[];
+  dailyTrend: { date: string; label: string; calls: number; succeeded: number; failed: number }[];
+  topTools: { toolName: string; calls: number; succeeded: number; failed: number; successRate: number | null; avgDurationMs: number | null }[];
+  deviceDistribution: {
+    deviceId: string;
+    deviceName: string | null;
+    revoked: boolean;
+    deleted: boolean;
+    calls: number;
+    succeeded: number;
+    failed: number;
+    successRate: number | null;
+    avgDurationMs: number | null;
+    sharePercent: number;
+  }[];
+  statusBreakdown30d: Record<string, number>;
+  generatedAt: string;
+};
+
+export function evaluateMonthlySoftQuota(
+  monthlyCalls: number,
+  limit: number | null | undefined,
+  now = Date.now()
+): MonthlySoftQuotaStatus | null {
+  if (limit === null || limit === undefined || !Number.isSafeInteger(limit) || limit <= 0) return null;
+  const d = new Date(now);
+  const resetAt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
+  const used = Math.max(0, Math.floor(monthlyCalls));
+  const percent = Math.round((used / limit) * 100);
+  const warning = used / limit >= 0.8;
+  const status: MonthlySoftQuotaStatus['status'] = used >= limit ? 'exceeded' : warning ? 'warning' : 'ok';
+  const message = status === 'exceeded'
+    ? `Monthly call usage (${used}/${limit}, ${percent}%) reached the configured soft quota. Self-hosted calls are not blocked; resets at ${resetAt}.`
+    : status === 'warning'
+      ? `Monthly call usage (${used}/${limit}, ${percent}%) reached the 80% soft quota warning threshold. Self-hosted calls are not blocked; resets at ${resetAt}.`
+      : undefined;
+  return {
+    limit,
+    used,
+    percent,
+    warningThresholdPercent: 80,
+    status,
+    warning,
+    blocking: false,
+    resetAt,
+    ...(message ? { message } : {})
+  };
+}
 export type RegistrationMode = 'invite_only' | 'open' | 'closed';
 export type UserRecord = {
   id: string;
@@ -127,7 +202,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS registration_invites (code_hash TEXT PRIMARY KEY, code_prefix TEXT NOT NULL, note TEXT,
         max_uses INTEGER NOT NULL DEFAULT 1, used_count INTEGER NOT NULL DEFAULT 0, expires_at INTEGER,
-        created_by TEXT NOT NULL, created_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);`);
+        created_by TEXT NOT NULL, created_at INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS usage_events (task_id TEXT PRIMARY KEY, user_id TEXT, device_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL, op TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,
+        finished_at INTEGER, duration_ms INTEGER);`);
     this.migrate();
   }
 
@@ -149,6 +227,7 @@ export class Store {
       this.ensureColumn('tasks', 'tool_name', 'TEXT');
       this.ensureColumn('tasks', 'background', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tasks', 'user_id', 'TEXT');
+      this.ensureColumn('tasks', 'duration_ms', 'INTEGER');
 
       if (this.ensureColumn('devices', 'last_seen', 'INTEGER')) {
         this.db.exec('UPDATE devices SET last_seen=seen WHERE seen>0');
@@ -172,6 +251,8 @@ export class Store {
         CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id, revoked);
         CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, created DESC);
         CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, id DESC);
+        CREATE INDEX IF NOT EXISTS usage_events_user_created ON usage_events(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS usage_events_created ON usage_events(created_at);
       `);
 
       if (!this.db.prepare("SELECT 1 FROM counters WHERE name='calls'").get()) {
@@ -181,7 +262,7 @@ export class Store {
         this.db.prepare("INSERT INTO system_settings(key,value,updated_at) VALUES('registration_mode','invite_only',?)").run(Date.now());
       }
 
-      if (currentVersion < SCHEMA_VERSION) {
+      if (currentVersion < 1) {
         const existingAdmin = this.db.prepare("SELECT id FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1").get() as { id: string } | undefined;
         if (existingAdmin?.id) {
           this.db.prepare('UPDATE devices SET user_id=? WHERE user_id IS NULL').run(existingAdmin.id);
@@ -191,6 +272,21 @@ export class Store {
         }
         // Clear legacy auth sessions/tokens that have no userId bound
         this.db.exec("DELETE FROM auth WHERE kind IN ('dashboard','code','access','refresh') AND json_extract(data,'$.userId') IS NULL");
+      }
+
+      if (currentVersion < 2) {
+        this.db.exec(`
+          UPDATE tasks SET duration_ms = MAX(0, changed - created)
+          WHERE status IN ${doneSql} AND duration_ms IS NULL;
+          INSERT OR IGNORE INTO usage_events(task_id, user_id, device_id, tool_name, op, status, created_at, finished_at, duration_ms)
+          SELECT id, user_id, device, COALESCE(tool_name, op), op, status, created,
+            CASE WHEN status IN ${doneSql} THEN changed ELSE NULL END,
+            CASE WHEN status IN ${doneSql} THEN COALESCE(duration_ms, MAX(0, changed - created)) ELSE NULL END
+          FROM tasks;
+        `);
+      }
+
+      if (currentVersion < SCHEMA_VERSION) {
         this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       }
     });
@@ -502,9 +598,206 @@ export class Store {
     const d = new Date(now);
     const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
     const row = userId
-      ? this.db.prepare('SELECT count(*) AS n FROM tasks WHERE user_id=? AND created>=?').get(userId, monthStart) as { n: number }
-      : this.db.prepare('SELECT count(*) AS n FROM tasks WHERE created>=?').get(monthStart) as { n: number };
+      ? this.db.prepare('SELECT count(*) AS n FROM usage_events WHERE user_id=? AND created_at>=?').get(userId, monthStart) as { n: number }
+      : this.db.prepare('SELECT count(*) AS n FROM usage_events WHERE created_at>=?').get(monthStart) as { n: number };
     return Number(row.n);
+  }
+
+  usageAnalytics(userId?: string, options?: { now?: number; windowDays?: number; topLimit?: number }): UsageAnalytics {
+    const now = options?.now ?? Date.now();
+    const windowDays = Math.max(1, Math.min(90, options?.windowDays ?? 30));
+    const topLimit = Math.max(1, Math.min(30, options?.topLimit ?? 10));
+    const d = new Date(now);
+    const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const nextMonthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1);
+    const sinceWindow = now - windowDays * day;
+    const sixMonthsStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 5, 1);
+    const dailyStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - (windowDays - 1));
+
+    const userFilter = userId ? 'user_id=? AND ' : '';
+    const userArgs = userId ? [userId] : [];
+    const monthCalls = this.monthlyCalls(userId, now);
+
+    const agg = this.db.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status IN ${doneSql} THEN 1 ELSE 0 END) AS terminal_count,
+        SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded_count,
+        SUM(CASE WHEN status IN ${failedSql} THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN status IN ${deniedOrCancelledSql} THEN 1 ELSE 0 END) AS denied_cancelled_count,
+        AVG(CASE WHEN status IN ${doneSql} AND duration_ms IS NOT NULL THEN duration_ms ELSE NULL END) AS avg_duration
+      FROM usage_events
+      WHERE ${userFilter}created_at>=?`
+    ).get(...userArgs, sinceWindow) as {
+      total: number;
+      terminal_count: number | null;
+      succeeded_count: number | null;
+      failed_count: number | null;
+      denied_cancelled_count: number | null;
+      avg_duration: number | null;
+    };
+
+    const last30dCalls = Number(agg.total ?? 0);
+    const terminalCalls30d = Number(agg.terminal_count ?? 0);
+    const succeededCalls30d = Number(agg.succeeded_count ?? 0);
+    const failedCalls30d = Number(agg.failed_count ?? 0);
+    const deniedOrCancelledCalls30d = Number(agg.denied_cancelled_count ?? 0);
+    const successRate30d = terminalCalls30d > 0
+      ? Number(((succeededCalls30d / terminalCalls30d) * 100).toFixed(1))
+      : null;
+    const avgDurationMs30d = agg.avg_duration !== null && agg.avg_duration !== undefined
+      ? Math.round(Number(agg.avg_duration))
+      : null;
+
+    const taskCounts = this.taskStatusCounts(userId);
+    const activeTasks = Object.entries(taskCounts)
+      .filter(([status]) => !terminal.some(value => value === status))
+      .reduce((sum, [, count]) => sum + count, 0);
+
+    const monthlyRows = this.db.prepare(
+      `SELECT
+        strftime('%Y-%m', created_at / 1000.0, 'unixepoch') AS bucket,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN status IN ${failedSql} THEN 1 ELSE 0 END) AS failed
+      FROM usage_events
+      WHERE ${userFilter}created_at>=?
+      GROUP BY bucket`
+    ).all(...userArgs, sixMonthsStart) as { bucket: string; calls: number; succeeded: number | null; failed: number | null }[];
+    const monthlyMap = new Map(monthlyRows.map(r => [String(r.bucket), r]));
+    const monthlyTrend: UsageAnalytics['monthlyTrend'] = [];
+    for (let i = 5; i >= 0; i--) {
+      const m = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1));
+      const key = `${m.getUTCFullYear()}-${String(m.getUTCMonth() + 1).padStart(2, '0')}`;
+      const hit = monthlyMap.get(key);
+      monthlyTrend.push({
+        month: key,
+        label: `${m.getUTCMonth() + 1}月`,
+        calls: hit ? Number(hit.calls) : 0,
+        succeeded: hit ? Number(hit.succeeded ?? 0) : 0,
+        failed: hit ? Number(hit.failed ?? 0) : 0
+      });
+    }
+
+    const dailyRows = this.db.prepare(
+      `SELECT
+        strftime('%Y-%m-%d', created_at / 1000.0, 'unixepoch') AS bucket,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN status IN ${failedSql} THEN 1 ELSE 0 END) AS failed
+      FROM usage_events
+      WHERE ${userFilter}created_at>=?
+      GROUP BY bucket`
+    ).all(...userArgs, dailyStart) as { bucket: string; calls: number; succeeded: number | null; failed: number | null }[];
+    const dailyMap = new Map(dailyRows.map(r => [String(r.bucket), r]));
+    const dailyTrend: UsageAnalytics['dailyTrend'] = [];
+    for (let i = windowDays - 1; i >= 0; i--) {
+      const dayDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - i));
+      const key = `${dayDate.getUTCFullYear()}-${String(dayDate.getUTCMonth() + 1).padStart(2, '0')}-${String(dayDate.getUTCDate()).padStart(2, '0')}`;
+      const hit = dailyMap.get(key);
+      dailyTrend.push({
+        date: key,
+        label: `${dayDate.getUTCMonth() + 1}/${dayDate.getUTCDate()}`,
+        calls: hit ? Number(hit.calls) : 0,
+        succeeded: hit ? Number(hit.succeeded ?? 0) : 0,
+        failed: hit ? Number(hit.failed ?? 0) : 0
+      });
+    }
+
+    const toolRows = this.db.prepare(
+      `SELECT
+        tool_name,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN status IN ${doneSql} THEN 1 ELSE 0 END) AS terminal_count,
+        SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN status IN ${failedSql} THEN 1 ELSE 0 END) AS failed,
+        AVG(CASE WHEN status IN ${doneSql} AND duration_ms IS NOT NULL THEN duration_ms ELSE NULL END) AS avg_duration
+      FROM usage_events
+      WHERE ${userFilter}created_at>=?
+      GROUP BY tool_name
+      ORDER BY calls DESC, tool_name ASC
+      LIMIT ?`
+    ).all(...userArgs, sinceWindow, topLimit) as {
+      tool_name: string; calls: number; terminal_count: number | null; succeeded: number | null; failed: number | null; avg_duration: number | null;
+    }[];
+    const topTools: UsageAnalytics['topTools'] = toolRows.map(r => {
+      const term = Number(r.terminal_count ?? 0);
+      const succ = Number(r.succeeded ?? 0);
+      return {
+        toolName: String(r.tool_name),
+        calls: Number(r.calls),
+        succeeded: succ,
+        failed: Number(r.failed ?? 0),
+        successRate: term > 0 ? Number(((succ / term) * 100).toFixed(1)) : null,
+        avgDurationMs: r.avg_duration !== null && r.avg_duration !== undefined ? Math.round(Number(r.avg_duration)) : null
+      };
+    });
+
+    const eUserFilter = userId ? 'e.user_id=? AND ' : '';
+    const deviceRows = this.db.prepare(
+      `SELECT
+        e.device_id AS device_id,
+        d.name AS device_name,
+        COALESCE(d.revoked, 0) AS revoked,
+        (d.id IS NULL) AS deleted,
+        COUNT(*) AS calls,
+        SUM(CASE WHEN e.status IN ${doneSql} THEN 1 ELSE 0 END) AS terminal_count,
+        SUM(CASE WHEN e.status='succeeded' THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN e.status IN ${failedSql} THEN 1 ELSE 0 END) AS failed,
+        AVG(CASE WHEN e.status IN ${doneSql} AND e.duration_ms IS NOT NULL THEN e.duration_ms ELSE NULL END) AS avg_duration
+      FROM usage_events e
+      LEFT JOIN devices d ON d.id = e.device_id
+      WHERE ${eUserFilter}e.created_at>=?
+      GROUP BY e.device_id
+      ORDER BY calls DESC, e.device_id ASC`
+    ).all(...userArgs, sinceWindow) as {
+      device_id: string; device_name: string | null; revoked: number; deleted: number;
+      calls: number; terminal_count: number | null; succeeded: number | null; failed: number | null; avg_duration: number | null;
+    }[];
+    const deviceDistribution: UsageAnalytics['deviceDistribution'] = deviceRows.map(r => {
+      const calls = Number(r.calls);
+      const term = Number(r.terminal_count ?? 0);
+      const succ = Number(r.succeeded ?? 0);
+      return {
+        deviceId: String(r.device_id),
+        deviceName: r.device_name ? String(r.device_name) : null,
+        revoked: Boolean(r.revoked),
+        deleted: Boolean(r.deleted),
+        calls,
+        succeeded: succ,
+        failed: Number(r.failed ?? 0),
+        successRate: term > 0 ? Number(((succ / term) * 100).toFixed(1)) : null,
+        avgDurationMs: r.avg_duration !== null && r.avg_duration !== undefined ? Math.round(Number(r.avg_duration)) : null,
+        sharePercent: last30dCalls > 0 ? Number(((calls / last30dCalls) * 100).toFixed(1)) : 0
+      };
+    });
+
+    const statusRows = this.db.prepare(
+      `SELECT status, COUNT(*) AS count FROM usage_events WHERE ${userFilter}created_at>=? GROUP BY status`
+    ).all(...userArgs, sinceWindow) as { status: string; count: number }[];
+    const statusBreakdown30d = Object.fromEntries(statusRows.map(r => [String(r.status), Number(r.count)]));
+
+    return {
+      summary: {
+        monthCalls,
+        last30dCalls,
+        dailyAverageMonth: Number((monthCalls / Math.max(1, d.getUTCDate())).toFixed(1)),
+        terminalCalls30d,
+        succeededCalls30d,
+        failedCalls30d,
+        deniedOrCancelledCalls30d,
+        successRate30d,
+        avgDurationMs30d,
+        activeTasks,
+        resetAt: new Date(nextMonthStart).toISOString()
+      },
+      monthlyTrend,
+      dailyTrend,
+      topTools,
+      deviceDistribution,
+      statusBreakdown30d,
+      generatedAt: new Date(now).toISOString()
+    };
   }
 
   // --- Devices & Pairing ---
@@ -733,6 +1026,7 @@ export class Store {
       id: t.id, device: t.device, operation: t.op, status: t.status,
       toolName: t.tool_name ?? undefined, cancelRequested: !!t.cancel,
       createdAt: new Date(t.created).toISOString(), updatedAt: new Date(t.changed).toISOString(),
+      durationMs: t.duration_ms !== undefined && t.duration_ms !== null ? Number(t.duration_ms) : null,
       output: t.output, ...(t.mcp_result ? { result: JSON.parse(t.mcp_result) } : {})
     };
   }
@@ -754,6 +1048,8 @@ export class Store {
       const owner = dev.user_id ?? userId ?? this.resolveOwner();
       this.db.prepare("INSERT INTO tasks(id,user_id,device,op,args,status,created,changed,deadline,tool_name) VALUES(?,?,?,?,?,'queued',?,?,?,?)")
         .run(id, owner, device, op, body, now, now, now + 900000, nativeName);
+      this.db.prepare("INSERT INTO usage_events(task_id,user_id,device_id,tool_name,op,status,created_at) VALUES(?,?,?,?,?,'queued',?)")
+        .run(id, owner, device, nativeName ?? op, op, now);
       this.audit('task_submitted', { id, device, op, argsDigest: hash(body) }, owner);
       return this.view(this.task(id)!);
     });
@@ -778,9 +1074,13 @@ export class Store {
   }
 
   finish(id: string, status: string, output: string, result?: Update['result']) {
-    const row = this.db.prepare('SELECT user_id FROM tasks WHERE id=?').get(id) as { user_id: string | null } | undefined;
-    this.db.prepare("UPDATE tasks SET status=?,changed=?,output=?,mcp_result=?,args='{}' WHERE id=?")
-      .run(status, Date.now(), output, result ? JSON.stringify(result) : null, id);
+    const row = this.db.prepare('SELECT user_id, created FROM tasks WHERE id=?').get(id) as { user_id: string | null; created: number } | undefined;
+    const now = Date.now();
+    const durationMs = row ? Math.max(0, now - Number(row.created)) : null;
+    this.db.prepare("UPDATE tasks SET status=?,changed=?,duration_ms=?,output=?,mcp_result=?,args='{}' WHERE id=?")
+      .run(status, now, durationMs, output, result ? JSON.stringify(result) : null, id);
+    this.db.prepare('UPDATE usage_events SET status=?,finished_at=?,duration_ms=? WHERE task_id=?')
+      .run(status, now, durationMs, id);
     this.audit('task_' + status, { id }, row?.user_id);
   }
 
@@ -830,7 +1130,7 @@ export class Store {
     }
   }
 
-  maintain(taskDays = 7, auditDays = 90, dcrClientDays = 30) {
+  maintain(taskDays = 7, auditDays = 90, dcrClientDays = 30, usageDays = 210) {
     this.tx(() => {
       this.flushLiveSeen();
       const now = Date.now();
@@ -840,6 +1140,7 @@ export class Store {
           t.status === 'queued' ? 'Expired before dispatch.' : 'Agent result was not received. Check the device before retrying.');
       }
       this.db.prepare(`DELETE FROM tasks WHERE status IN ${doneSql} AND changed<?`).run(now - taskDays * day);
+      this.db.prepare('DELETE FROM usage_events WHERE created_at<?').run(now - Math.max(usageDays, 210) * day);
       this.db.prepare('DELETE FROM audit WHERE at<?').run(now - auditDays * day);
       this.db.prepare('DELETE FROM invites WHERE expires<?').run(now);
       this.db.prepare('DELETE FROM auth WHERE expires<?').run(now);
@@ -900,6 +1201,7 @@ export class Store {
         } else {
           if (t.status !== u.status) this.audit('task_' + u.status, { id: u.id }, t.user_id);
           this.db.prepare('UPDATE tasks SET status=?,seq=?,changed=?,output=? WHERE id=?').run(u.status, u.seq, now, u.output ?? null, u.id);
+          this.db.prepare('UPDATE usage_events SET status=? WHERE task_id=?').run(u.status, u.id);
         }
       }
       const approvalMode = normalizeApprovalMode(dev.approval_mode);
@@ -918,6 +1220,7 @@ export class Store {
         .all(device, now, Math.max(0, maxActive - active.length)) as TaskRow[];
       for (const t of pending) {
         this.db.prepare("UPDATE tasks SET status='dispatched',boot=?,changed=?,deadline=? WHERE id=?").run(boot, now, now + dispatchMs, t.id);
+        this.db.prepare("UPDATE usage_events SET status='dispatched' WHERE task_id=?").run(t.id);
         this.audit('task_dispatched', { id: t.id, device }, t.user_id);
       }
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));

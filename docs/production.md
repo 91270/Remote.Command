@@ -241,7 +241,8 @@ docker compose up -d --wait gateway
 | **服务健康** | `/healthz`（存活）与 `/readyz`（数据库可访问）均返回 `200`。 |
 | **HTTPS 与 OAuth** | 确认 TLS 证书有效，`/.well-known/oauth-protected-resource/mcp` 指向你的 HTTPS Gateway，且 `/auth/google/start` 能正常重定向到 Google 授权页。 |
 | **日志与磁盘** | 执行 `docker compose logs --tail 100 gateway`，查看限流或上游 OIDC 错误；检查宿主机 Nginx 日志与备份磁盘空间。 |
-| **数据保留策略** | 已结束任务默认保留 **7 天**（`RCM_TASK_RETENTION_DAYS`），审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
+| **数据保留策略** | 已结束任务默认保留 **7 天**（`RCM_TASK_RETENTION_DAYS`），脱敏用量元数据（`usage_events`，不含参数与输出正文）默认保留 **210 天**以支撑近 6 个月趋势统计，审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
+| **月度软配额告警** | 可选配置 `RCM_MONTHLY_SOFT_QUOTA`（正整数；未配置或 `0` 表示关闭）。当月调用量达到 **80%** 阈值时，`/manage` 控制台与 `who_am_i` 工具将返回非阻断软告警（默认不阻断任何自建工具调用）。 |
 | **紧急撤销与诊断** | 控制台 `/manage` 可按用户撤销单台设备、全部设备或 OAuth 授权，管理员还可停用异常成员账号；客户端可使用 `remote --report` 导出脱敏诊断包。 |
 
 真实域名生产验收建议覆盖：外网 TLS 证书、真实 Google OIDC 管理员与邀请用户登录、真实 ChatGPT 账号接入、一次读操作、一次本机审批操作、一次后台任务查询及一次备份恢复演练。当前已验证环境与待测项见 [验收记录](verification.md)。

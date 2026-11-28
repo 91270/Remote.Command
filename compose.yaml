@@ -15,6 +15,8 @@ services:
       # ADMIN_GOOGLE_EMAILS: you@gmail.com
       # 部署在宿主机 Nginx 等反向代理后时建议开启，用于限流识别真实客户端 IP
       TRUST_PROXY: ${TRUST_PROXY:-}
+      # 可选：月度软配额告警阈值（正整数；达到 80% 时在控制台与 who_am_i 发出非阻断提醒，留空或 0 表示关闭）
+      # RCM_MONTHLY_SOFT_QUOTA: 10000
       # OAuth 客户端与回调地址已通过 DCR (/oauth/register) 自动发现并注册，无需手动配置
       # 如需限制额外回调域名，可按需配置 OAUTH_ALLOWED_REDIRECT_HOSTS: chatgpt.com,platform.openai.com
     volumes:

@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { HttpError, json, readJson } from './http.js';
 import { approvalModes, capabilities, match, secret, terminal, uuid, type ApprovalMode, type Capability } from './protocol.js';
 import type { RateLimiter } from './rate-limit.js';
-import type { Store, UserRecord } from './store.js';
+import { evaluateMonthlySoftQuota, type Store, type UserRecord } from './store.js';
 
 const sessionLifetime = 8 * 60 * 60 * 1000;
 const key = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -18,7 +18,7 @@ const assets = new Map([
   ['/assets/landing.js', ['landing.js', 'text/javascript; charset=utf-8']]
 ]);
 
-type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: RateLimiter };
+type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: RateLimiter; monthlySoftQuota?: number | null };
 type Session = { digest: string; csrf: string; user: UserRecord };
 type DeviceVerification = {
   preview(code: string): { deviceName: string; expiresAt: string } | undefined;
@@ -121,14 +121,24 @@ export class Dashboard {
       if (req.method === 'GET' && url.pathname === '/manage/api/overview') {
         const devices = this.store.devices(userId);
         const taskCounts = this.store.taskStatusCounts(userId);
+        const monthlyCalls = this.store.monthlyCalls(userId);
+        const softQuota = evaluateMonthlySoftQuota(monthlyCalls, this.config.monthlySoftQuota);
         json(res, 200, {
           devices,
           taskCounts,
           totalCalls: this.store.totalCalls(userId),
+          monthlyCalls,
+          softQuota,
           activeTasks: Object.entries(taskCounts).filter(([status]) => !terminal.some(value => value === status)).reduce((sum, [, count]) => sum + count, 0),
           mcpUrl: this.config.origin + '/mcp',
           serverTime: new Date().toISOString()
         });
+        return true;
+      }
+      if (req.method === 'GET' && url.pathname === '/manage/api/usage') {
+        const analytics = this.store.usageAnalytics(userId);
+        const softQuota = evaluateMonthlySoftQuota(analytics.summary.monthCalls, this.config.monthlySoftQuota);
+        json(res, 200, { ...analytics, softQuota });
         return true;
       }
       if (req.method === 'GET' && url.pathname === '/manage/api/tasks') {

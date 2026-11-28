@@ -362,7 +362,7 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
       plan: 'pro',
       authMethods: ['google'],
       devices: { paired: 0, online: 0, offline: 0, selectedDevice: null },
-      usage: { retainedCalls: 0, monthlyCalls: 0, activeTasks: 0, callQuota: null },
+      usage: { retainedCalls: 0, monthlyCalls: 0, activeTasks: 0, callQuota: null, softQuota: null },
       version: pkgVersion
     });
     const store = new Store(db);
@@ -558,4 +558,72 @@ test('OAuth + Streamable HTTP + Gateway + Agent + native tools, including reconn
     await assert.rejects(() => readFile(join(stateDir, 'identity.json')), /ENOENT/);
   } catch (e) { t.diagnostic(stdout()); throw e; }
   finally { await client?.close(); await stop(agent); await stop(gateway); proxy?.closeAllConnections(); proxy?.close(); globalThis.fetch = originalFetch; await rm(temp, { recursive: true, force: true }); }
+});
+
+test('RCM_MONTHLY_SOFT_QUOTA surfaces soft alert in who_am_i without blocking device calls', { timeout: 20000 }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-soft-quota-'));
+  const db = join(temp, 'gateway.sqlite');
+  const p = await port();
+  const origin = `http://127.0.0.1:${p}`;
+  const env = {
+    ...process.env,
+    STATE_DB: db,
+    PUBLIC_ORIGIN: origin,
+    ALLOW_INSECURE_LOOPBACK: '1',
+    PORT: String(p),
+    BIND_HOST: '127.0.0.1',
+    OWNER_KEY: secret(),
+    GOOGLE_CLIENT_ID: 'fixture-google-client',
+    GOOGLE_CLIENT_SECRET: 'fixture-google-secret',
+    RCM_MONTHLY_SOFT_QUOTA: '2'
+  };
+  let gateway, client;
+  try {
+    const seedStore = new Store(db);
+    const created = seedStore.createGoogleUser({
+      sub: 'e2e-soft-quota-sub',
+      email: 'softquota@example.com',
+      displayName: 'Soft Quota User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(created.status, 'ok');
+    const accessToken = secret();
+    seedStore.putAuth(accessToken, 'access', 3600000, { userId: created.user.id, scope: 'remote:use' });
+    const catalog = JSON.parse(await readFile('vendor/desktop-commander-full/catalog.json', 'utf8'));
+    const dev = seedStore.pair(seedStore.invite('SoftBox', ['read'], created.user.id), secret());
+    const boot = secret();
+    seedStore.sync(dev.id, boot, 'linux', [], catalog);
+    // Seed 2 completed calls in the current month (100% of RCM_MONTHLY_SOFT_QUOTA=2)
+    for (let i = 0; i < 2; i++) {
+      const task = seedStore.submit(dev.id, 'dc_call', { tool: 'read_file', arguments: { path: 'x.txt' } }, created.user.id);
+      seedStore.finish(task.id, 'succeeded', 'ok');
+    }
+    seedStore.db.close();
+
+    gateway = start(['dist/gateway.js'], { env });
+    await until(async () => (await fetch(origin + '/healthz')).ok);
+
+    client = new Client({ name: 'soft-quota-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(origin + '/mcp'), { requestInit: { headers: jwt(accessToken) } }));
+    const whoRes = await client.callTool({ name: 'who_am_i', arguments: {} });
+    const who = JSON.parse(whoRes.content[0].text);
+    assert.equal(who.usage.monthlyCalls, 2);
+    assert.equal(who.usage.softQuota.limit, 2);
+    assert.equal(who.usage.softQuota.status, 'exceeded');
+    assert.equal(who.usage.softQuota.warning, true);
+    assert.equal(who.usage.softQuota.blocking, false);
+    assert.match(who.usage.softQuota.message, /not blocked/);
+
+    // Verify self-hosted device calls are NOT blocked when soft quota is exceeded
+    const readRes = await client.callTool({ name: 'read_file', arguments: { device_id: dev.id, path: 'y.txt' } });
+    const readPayload = JSON.parse(readRes.content[0].text);
+    assert.equal(readRes.isError, undefined);
+    assert.ok(readPayload.call_id);
+    assert.equal(readPayload.status, 'queued');
+  } finally {
+    await client?.close();
+    await stop(gateway);
+    await rm(temp, { recursive: true, force: true });
+  }
 });

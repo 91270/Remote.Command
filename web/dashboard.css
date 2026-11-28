@@ -674,6 +674,9 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   gap: 18px;
   margin-bottom: 20px;
 }
+.usage-kpi-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -682,14 +685,32 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-secondary); paddin
   box-shadow: var(--shadow-sm);
 }
 .kpi-label { font-size: 13px; color: var(--text-secondary); margin: 0 0 8px; }
-.kpi-value { font-size: 32px; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; margin: 0 0 10px; }
+.kpi-value { font-size: 28px; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; margin: 0 0 10px; }
 .kpi-sub { font-size: 12px; color: var(--text-secondary); margin: 8px 0 0; }
 
 .usage-chart-wrap { width: 100%; overflow-x: auto; padding-top: 8px; }
 .usage-svg { width: 100%; height: 210px; display: block; }
 .usage-svg text { fill: var(--text-secondary); font-size: 11px; font-family: var(--font); }
 .usage-svg line { stroke: var(--border); stroke-width: 1; }
-.usage-svg rect.bar { fill: var(--accent); rx: 6; ry: 6; opacity: 0.9; }
+.usage-svg rect.bar { fill: var(--accent); rx: 5; ry: 5; opacity: 0.9; }
+.usage-svg rect.bar.zero { opacity: 0.18; }
+
+.usage-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.usage-breakdown-grid .card { margin-bottom: 0; }
+.usage-rank-list { display: flex; flex-direction: column; gap: 14px; }
+.usage-rank-item { display: flex; flex-direction: column; gap: 6px; }
+.usage-rank-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.usage-rank-name { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.usage-rank-name code { font-size: 13px; font-weight: 600; color: var(--text); background: var(--surface-subtle); padding: 2px 7px; border-radius: 7px; }
+.usage-rank-name strong { font-size: 13.5px; }
+.usage-rank-count { font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.usage-rank-bar { height: 6px; border-radius: 999px; background: var(--surface-subtle); overflow: hidden; }
+.usage-rank-fill { height: 100%; border-radius: 999px; background: var(--accent); transition: width 240ms var(--ease); }
+.usage-rank-meta { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 
 /* --- Plan Grid & FAQ --- */
 .plan-grid {
@@ -940,11 +961,15 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.48); backdrop-filter: blur(6px); 
   font-size: 12px;
 }
 
+@media (max-width: 1040px) {
+  .usage-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 860px) {
   .login-view { grid-template-columns: 1fr; padding: 28px 20px; gap: 28px; }
   .login-card { margin: 0 auto; }
   .app { grid-template-columns: 1fr; }
   .sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
   #console-main { padding: 20px 18px 40px; }
-  .kpi-grid, .plan-grid, .prompt-grid { grid-template-columns: 1fr; }
+  .kpi-grid, .plan-grid, .prompt-grid, .usage-breakdown-grid { grid-template-columns: 1fr; }
 }

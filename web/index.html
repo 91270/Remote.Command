@@ -217,7 +217,7 @@
 
       <!-- Panel 2: Usage -->
       <section id="panel-usage" class="panel" aria-label="用量" hidden>
-        <div class="kpi-grid">
+        <div class="kpi-grid usage-kpi-grid">
           <article class="kpi-card">
             <p class="kpi-label">本月工具调用</p>
             <p id="usage-month-value" class="kpi-value">0 / 10,000</p>
@@ -225,9 +225,19 @@
             <p id="usage-month-sub" class="kpi-sub">0% 已使用 · 每月 1 日 00:00 UTC 重置</p>
           </article>
           <article class="kpi-card">
-            <p class="kpi-label">日均调用</p>
-            <p id="usage-daily-avg" class="kpi-value">0</p>
-            <p class="kpi-sub">本月累计调用 ÷ 本月已过天数</p>
+            <p class="kpi-label">近 30 天调用</p>
+            <p id="usage-30d-value" class="kpi-value">0</p>
+            <p id="usage-daily-avg-sub" class="kpi-sub">本月日均 0 次/天</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">成功率（近 30 天）</p>
+            <p id="usage-success-rate" class="kpi-value">—</p>
+            <p id="usage-success-sub" class="kpi-sub">暂无已结束调用</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">平均耗时（近 30 天）</p>
+            <p id="usage-avg-duration" class="kpi-value">—</p>
+            <p id="usage-duration-sub" class="kpi-sub">仅统计脱敏元数据</p>
           </article>
         </div>
 
@@ -235,10 +245,36 @@
           <div class="card-head">
             <div>
               <h2>调用趋势</h2>
-              <p>近 6 个月按月统计（不含敏感参数与结果正文）</p>
+              <p id="usage-trend-subtitle">近 30 天按日统计（不含敏感参数与结果正文）</p>
+            </div>
+            <div class="segmented" role="tablist" aria-label="趋势时间范围">
+              <button type="button" class="seg-btn usage-range-btn active" role="tab" aria-selected="true" data-usage-range="30d">近 30 天</button>
+              <button type="button" class="seg-btn usage-range-btn" role="tab" aria-selected="false" data-usage-range="6m">近 6 个月</button>
             </div>
           </div>
-          <div id="usage-chart" class="usage-chart-wrap" aria-label="近 6 个月调用柱状图"></div>
+          <div id="usage-chart" class="usage-chart-wrap" aria-label="调用趋势柱状图"></div>
+        </div>
+
+        <div class="usage-breakdown-grid">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>Top 工具排行</h2>
+                <p>近 30 天调用次数前 10</p>
+              </div>
+            </div>
+            <div id="usage-top-tools" class="usage-rank-list" aria-live="polite"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>设备调用分布</h2>
+                <p>近 30 天各设备调用占比与表现</p>
+              </div>
+            </div>
+            <div id="usage-devices" class="usage-rank-list" aria-live="polite"></div>
+          </div>
         </div>
       </section>
 

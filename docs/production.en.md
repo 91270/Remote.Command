@@ -239,7 +239,8 @@ docker compose up -d --wait gateway
 | **Health** | `/healthz` (liveness) and `/readyz` (SQLite readiness) return `200`. |
 | **HTTPS & OAuth** | Verify valid TLS certificates, `/.well-known/oauth-protected-resource/mcp` points to your HTTPS origin, and `/auth/google/start` redirects cleanly to Google. |
 | **Logs & Disk** | Run `docker compose logs --tail 100 gateway` to monitor rate-limit or upstream OIDC errors; check Nginx logs and backup disk capacity. |
-| **Retention** | Completed tasks default to **7 days** (`RCM_TASK_RETENTION_DAYS`), audit logs to **90 days** (`RCM_AUDIT_RETENTION_DAYS`), and DCR clients to **30 days** (`RCM_DCR_CLIENT_TTL_DAYS`). |
+| **Retention** | Completed tasks default to **7 days** (`RCM_TASK_RETENTION_DAYS`), desensitized usage metadata (`usage_events`, excluding arguments and outputs) is retained for **210 days** to power 6-month trends, audit logs default to **90 days** (`RCM_AUDIT_RETENTION_DAYS`), and DCR clients to **30 days** (`RCM_DCR_CLIENT_TTL_DAYS`). |
+| **Monthly Soft Quota Alert** | Optional `RCM_MONTHLY_SOFT_QUOTA` (positive integer; unset or `0` disables). When monthly usage reaches **80%**, both `/manage` and `who_am_i` emit a non-blocking soft alert without interrupting self-hosted calls. |
 | **Emergency Revoke & Diagnostics** | `/manage` supports revoking individual/all devices and OAuth sessions per user, plus disabling user accounts; Agents can export sanitized bundles with `remote --report`. |
 
 Production sign-off should cover: public TLS certificates, Google OIDC admin + invited user login, real ChatGPT MCP connection, one read call, one local-approval call, one background task query, and a backup/restore drill. See [verification.md](verification.md) for recorded verification results.

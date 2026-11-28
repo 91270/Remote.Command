@@ -18,7 +18,7 @@ test('Store initializes schema_version=1 cleanly without password_hash and enfor
     const store = new Store(file);
     try {
       const version = store.db.prepare('PRAGMA user_version').get().user_version;
-      assert.equal(version, 1);
+      assert.equal(version, 2);
       const userCols = store.db.prepare('PRAGMA table_info(users)').all().map(c => c.name);
       assert.equal(userCols.includes('password_hash'), false);
       const created = store.createGoogleUser({
@@ -97,6 +97,12 @@ test('multi-tenant isolation enforces strict boundaries between users across Sto
     const nextMonthNow = Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() + 1, 2);
     assert.equal(store.monthlyCalls(resA.user.id, nextMonthNow), 0);
     assert.equal(store.monthlyCalls(resB.user.id, nextMonthNow), 0);
+    const analyticsA = store.usageAnalytics(resA.user.id);
+    const analyticsB = store.usageAnalytics(resB.user.id);
+    assert.equal(analyticsA.summary.monthCalls, 1);
+    assert.equal(analyticsB.summary.monthCalls, 1);
+    assert.deepEqual(analyticsA.deviceDistribution.map(d => d.deviceId), [devA.id]);
+    assert.deepEqual(analyticsB.deviceDistribution.map(d => d.deviceId), [devB.id]);
     assert.deepEqual(store.devices(resA.user.id).map(d => d.id), [devA.id]);
     assert.deepEqual(store.devices(resB.user.id).map(d => d.id), [devB.id]);
     assert.throws(() => store.submit(devA.id, 'dc_call', { tool: 'read_file', arguments: {} }, resB.user.id), /Unknown or revoked device/);
