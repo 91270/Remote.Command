@@ -171,8 +171,9 @@ remote-command remote --gateway https://mcp.example.com --install-service
 ```
 
 ```powershell
-# Windows (PowerShell)
+# Windows：在控制台「添加设备」下载 remote-windows.cmd 双击运行，或执行以下 PowerShell（自动创建桌面快捷方式可选 ?shortcut=1）
 irm 'https://mcp.example.com/install.ps1?service=1' | iex
+# 或下载双击安装器：https://mcp.example.com/install/remote-windows.cmd?service=1
 ```
 
 ### 手动解包与独立服务注册

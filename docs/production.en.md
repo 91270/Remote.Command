@@ -171,7 +171,7 @@ remote-command remote --gateway https://mcp.example.com --install-service
 ```
 
 ```powershell
-# Windows (PowerShell)
+# Windows: Download and double-click /install/remote-windows.cmd?service=1 from the dashboard (auto-creates a Desktop shortcut), or run PowerShell:
 irm 'https://mcp.example.com/install.ps1?service=1' | iex
 ```
 

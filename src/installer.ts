@@ -4,6 +4,22 @@ import { projectVersion } from './protocol.js';
 
 const releaseRepo = '91270/Remote.Command';
 
+function assertSafeOrigin(origin: string): string {
+  const url = new URL(origin);
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== '/' ||
+    (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+    !/^[A-Za-z0-9:./_-]+$/.test(url.origin)
+  ) {
+    throw new Error('Installer origin must be a bare HTTP(S) origin without unsafe characters.');
+  }
+  return url.origin;
+}
+
 function findBundledAgentTgz(): string | null {
   const filename = `remote-command-${projectVersion}.tgz`;
   const candidates = [
@@ -97,9 +113,10 @@ exec "$NODE_BIN" "\${CLIENT_DIR}/dist/remote-cli.js" remote --gateway "\${ORIGIN
 `;
 }
 
-function renderPowerShellInstaller(origin: string, installService = false): string {
+function renderPowerShellInstaller(origin: string, installService = false, createShortcut = false): string {
   const version = projectVersion;
   const defaultInstallService = installService ? '$true' : '$false';
+  const defaultCreateShortcut = createShortcut ? '$true' : '$false';
   return `$ErrorActionPreference = 'Stop'
 
 $Origin = '${origin}'
@@ -108,6 +125,38 @@ $BaseDir = Join-Path $env:USERPROFILE '.remote-command'
 $ClientDir = Join-Path $BaseDir ("client-" + $Version)
 $NodeDir = Join-Path $BaseDir 'node'
 $NodeVersion = 'v24.11.1'
+
+function Ensure-DesktopShortcut($NodeBin, $CliPath, $Origin, $BaseDir) {
+  try {
+    New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null
+    $launcherCmd = Join-Path $BaseDir 'launch-agent.cmd'
+    $cmdLines = @(
+      '@echo off',
+      'setlocal EnableExtensions',
+      'title Remote.Command Agent',
+      ('"' + $NodeBin + '" "' + $CliPath + '" remote --gateway "' + $Origin + '" --yes %*'),
+      'if errorlevel 1 (',
+      '  echo.',
+      '  echo Remote.Command Agent exited with an error.',
+      '  pause',
+      ')'
+    )
+    [System.IO.File]::WriteAllText($launcherCmd, ($cmdLines -join "\`r\`n") + "\`r\`n", [System.Text.Encoding]::ASCII)
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if ($desktop -and (Test-Path $desktop)) {
+      $shortcutPath = Join-Path $desktop 'Remote.Command Agent.lnk'
+      $shell = New-Object -ComObject WScript.Shell
+      $shortcut = $shell.CreateShortcut($shortcutPath)
+      $shortcut.TargetPath = $launcherCmd
+      $shortcut.WorkingDirectory = $BaseDir
+      $shortcut.Description = 'Launch Remote.Command Agent'
+      $shortcut.Save()
+      Write-Host "Desktop shortcut ready: $shortcutPath"
+    }
+  } catch {
+    Write-Host "Skipped desktop shortcut setup: $($_.Exception.Message)"
+  }
+}
 
 function Test-NodeVersion($Bin) {
   if (-not (Get-Command $Bin -ErrorAction SilentlyContinue)) { return $false }
@@ -161,6 +210,10 @@ if (-not (Test-Path $CliPath)) {
   }
 }
 
+$CreateShortcut = ${defaultCreateShortcut}
+if ($env:RCM_DESKTOP_SHORTCUT -eq '1') { $CreateShortcut = $true }
+if ($CreateShortcut) { Ensure-DesktopShortcut $NodeBin $CliPath $Origin $BaseDir }
+
 $InstallService = ${defaultInstallService}
 if ($env:RCM_INSTALL_SERVICE -eq '1') { $InstallService = $true }
 if ($InstallService -and ($args -notcontains '--install-service')) {
@@ -171,14 +224,50 @@ if ($InstallService -and ($args -notcontains '--install-service')) {
 `;
 }
 
+function renderWindowsCmdLauncher(origin: string, installService = false, createShortcut = true): string {
+  const params = new URLSearchParams();
+  if (installService) params.set('service', '1');
+  if (createShortcut) params.set('shortcut', '1');
+  const qs = params.toString();
+  const scriptUrl = `${origin}/install.ps1${qs ? `?${qs}` : ''}`;
+  const lines = [
+    '@echo off',
+    'setlocal EnableExtensions',
+    'title Remote.Command Agent Installer',
+    'chcp 65001 >nul 2>&1',
+    `set "RCM_SCRIPT_URL=${scriptUrl}"`,
+    'echo Connecting to Remote.Command Gateway: %RCM_SCRIPT_URL%',
+    'echo.',
+    'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference=\'SilentlyContinue\'; Invoke-Expression (Invoke-WebRequest -UseBasicParsing -Uri $env:RCM_SCRIPT_URL).Content"',
+    'set "RCM_EXIT=%ERRORLEVEL%"',
+    'echo.',
+    'if not "%RCM_EXIT%"=="0" (',
+    '  echo Remote.Command Agent setup failed with exit code %RCM_EXIT%.',
+    '  echo Press any key to close this window...',
+    '  pause >nul',
+    '  exit /b %RCM_EXIT%',
+    ')',
+    'echo Remote.Command Agent finished.',
+    'echo Press any key to close this window...',
+    'pause >nul',
+    'exit /b 0',
+    ''
+  ];
+  return lines.join('\r\n');
+}
+
 export class Installer {
-  constructor(private readonly origin: string) {}
+  private readonly safeOrigin: string;
+
+  constructor(origin: string) {
+    this.safeOrigin = assertSafeOrigin(origin);
+  }
 
   async route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
     if (req.method !== 'GET') return false;
     const installService = url.searchParams.get('service') === '1' || url.searchParams.get('install_service') === '1';
     if (url.pathname === '/install.sh') {
-      const script = renderShellInstaller(this.origin, installService);
+      const script = renderShellInstaller(this.safeOrigin, installService);
       res.writeHead(200, {
         'Content-Type': 'text/x-shellscript; charset=utf-8',
         'Cache-Control': 'no-store'
@@ -186,10 +275,23 @@ export class Installer {
       return true;
     }
     if (url.pathname === '/install.ps1') {
-      const script = renderPowerShellInstaller(this.origin, installService);
+      const createShortcut = url.searchParams.get('shortcut') === '1' || url.searchParams.get('desktop_shortcut') === '1';
+      const script = renderPowerShellInstaller(this.safeOrigin, installService, createShortcut);
       res.writeHead(200, {
         'Content-Type': 'text/plain; charset=utf-8',
         'Cache-Control': 'no-store'
+      }).end(script);
+      return true;
+    }
+    if (url.pathname === '/install/remote-windows.cmd') {
+      const shortcutParam = url.searchParams.get('shortcut') ?? url.searchParams.get('desktop_shortcut');
+      const createShortcut = shortcutParam === '0' ? false : true;
+      const script = renderWindowsCmdLauncher(this.safeOrigin, installService, createShortcut);
+      res.writeHead(200, {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="remote-windows.cmd"',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff'
       }).end(script);
       return true;
     }

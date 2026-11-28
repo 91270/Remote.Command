@@ -198,7 +198,9 @@ test('OAuth DCR allows loopback redirect_uris from Codex/CLI even when Gateway o
   }
 });
 
-test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect/stream', async () => {
+test('Installer serves /install.sh, /install.ps1, /install/remote-windows.cmd and /install/agent.tgz redirect/stream', async () => {
+  assert.throws(() => new Installer('https://evil.example/?x=1'), /bare HTTP\(S\) origin/);
+
   const origin = 'https://mcp.example.com';
   const installer = new Installer(origin);
   const server = createServer(async (req, res) => {
@@ -229,12 +231,41 @@ test('Installer serves /install.sh, /install.ps1 and /install/agent.tgz redirect
     assert.match(ps, /\$Origin = 'https:\/\/mcp\.example\.com'/);
     assert.match(ps, /--gateway \$Origin --yes/);
     assert.match(ps, /\$InstallService = \$false/);
+    assert.match(ps, /\$CreateShortcut = \$false/);
     assert.match(ps, /RCM_INSTALL_SERVICE/);
+    assert.match(ps, /RCM_DESKTOP_SHORTCUT/);
     assert.match(ps, /--install-service/);
 
-    const psSvcRes = await fetch(localBase + '/install.ps1?service=1');
+    const psSvcRes = await fetch(localBase + '/install.ps1?service=1&shortcut=1');
     assert.equal(psSvcRes.status, 200);
-    assert.match(await psSvcRes.text(), /\$InstallService = \$true/);
+    const psSvc = await psSvcRes.text();
+    assert.match(psSvc, /\$InstallService = \$true/);
+    assert.match(psSvc, /\$CreateShortcut = \$true/);
+    assert.match(psSvc, /Ensure-DesktopShortcut/);
+    assert.match(psSvc, /launch-agent\.cmd/);
+    assert.match(psSvc, /WScript\.Shell/);
+
+    const cmdRes = await fetch(localBase + '/install/remote-windows.cmd');
+    assert.equal(cmdRes.status, 200);
+    assert.equal(cmdRes.headers.get('content-disposition'), 'attachment; filename="remote-windows.cmd"');
+    assert.equal(cmdRes.headers.get('cache-control'), 'no-store');
+    assert.equal(cmdRes.headers.get('x-content-type-options'), 'nosniff');
+    const cmd = await cmdRes.text();
+    assert.equal(cmd.includes('\r\n'), true);
+    assert.equal(/(?<!\r)\n/.test(cmd), false, 'Batch launcher must use strict CRLF line endings');
+    assert.equal(cmd.includes('set "RCM_SCRIPT_URL=https://mcp.example.com/install.ps1?shortcut=1"'), true);
+    assert.match(cmd, /powershell\.exe -NoProfile -ExecutionPolicy Bypass/);
+    assert.match(cmd, /\$env:RCM_SCRIPT_URL/);
+
+    const cmdSvcRes = await fetch(localBase + '/install/remote-windows.cmd?service=1');
+    assert.equal(cmdSvcRes.status, 200);
+    const cmdSvc = await cmdSvcRes.text();
+    assert.equal(cmdSvc.includes('set "RCM_SCRIPT_URL=https://mcp.example.com/install.ps1?service=1&shortcut=1"'), true);
+
+    const cmdNoShortcutRes = await fetch(localBase + '/install/remote-windows.cmd?shortcut=0');
+    assert.equal(cmdNoShortcutRes.status, 200);
+    const cmdNoShortcut = await cmdNoShortcutRes.text();
+    assert.equal(cmdNoShortcut.includes('set "RCM_SCRIPT_URL=https://mcp.example.com/install.ps1"'), true);
 
     const tgzRes = await fetch(localBase + '/install/agent.tgz', { redirect: 'manual' });
     assert.ok(tgzRes.status === 200 || tgzRes.status === 302);

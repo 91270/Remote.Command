@@ -814,6 +814,10 @@ function renderDevices() {
 function updateDeviceStartCommands() {
   const gateway = currentSession?.origin || location.origin;
   const installService = Boolean(byId('device-install-service')?.checked);
+  const cmdDownload = byId('download-device-cmd');
+  if (cmdDownload) {
+    cmdDownload.setAttribute('href', gateway + '/install/remote-windows.cmd' + (installService ? '?service=1' : ''));
+  }
   byId('device-start-ps').textContent = installService
     ? "irm '" + gateway + "/install.ps1?service=1' | iex"
     : 'irm ' + gateway + '/install.ps1 | iex';
@@ -1600,6 +1604,10 @@ byId('copy-device-sh').addEventListener('click', () => act(async () => {
   setDialogStep(2);
 }));
 byId('device-install-service')?.addEventListener('change', updateDeviceStartCommands);
+byId('download-device-cmd')?.addEventListener('click', () => {
+  notice('已开始下载 remote-windows.cmd，双击运行即可自动安装并连接。');
+  setDialogStep(2);
+});
 byId('copy-device-ps').addEventListener('click', () => act(async () => {
   await copyElement('device-start-ps', '已复制 Windows PowerShell 安装启动命令。');
   setDialogStep(2);

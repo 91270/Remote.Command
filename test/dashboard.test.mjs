@@ -86,6 +86,7 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /class="tasks-table"/);
     assert.match(html, /class="audit-table"/);
     assert.match(html, /id="device-install-service"/);
+    assert.match(html, /id="download-device-cmd"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     const dashboardCssRes = await request('/assets/dashboard.css');
     assert.equal(dashboardCssRes.status, 200);
@@ -96,7 +97,7 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     const dashboardJsRes = await request('/assets/dashboard.js');
     assert.equal(dashboardJsRes.status, 200);
     const dashboardJs = await dashboardJsRes.text();
-    for (const key of ['renderPromptLibrary', 'inspect', 'files', 'debug', 'ops', 'updateDeviceStartCommands', '--install-service', 'install.ps1?service=1']) {
+    for (const key of ['renderPromptLibrary', 'inspect', 'files', 'debug', 'ops', 'updateDeviceStartCommands', '--install-service', 'install.ps1?service=1', 'download-device-cmd', '/install/remote-windows.cmd']) {
       assert.equal(dashboardJs.includes(key), true, `dashboard.js missing ${key}`);
     }
     assert.equal(dashboardJs.includes('innerHTML'), false);

@@ -682,8 +682,14 @@
     </div>
 
     <div id="os-panel-windows" class="method-box" hidden>
-      <strong>PowerShell 一键启动 <span class="method-badge">推荐</span></strong>
-      <p class="subtle">自动检测或下载便携版 Node.js 24 并连接当前 Gateway。</p>
+      <strong>一键下载双击安装器 <span class="method-badge">推荐</span></strong>
+      <p class="subtle">无需手动打开 PowerShell，下载后双击即可自动安装便携版 Node.js 24、创建桌面快捷方式并连接。</p>
+      <div class="win-launcher-row">
+        <a id="download-device-cmd" class="primary button-link" href="/install/remote-windows.cmd" download="remote-windows.cmd">下载一键启动器 (.cmd)</a>
+      </div>
+      <div class="win-method-divider">
+        <span class="subtle">或复制 PowerShell 一键命令</span>
+      </div>
       <div class="copy-field">
         <code id="device-start-ps"></code>
         <button id="copy-device-ps" type="button" class="primary">复制命令</button>
