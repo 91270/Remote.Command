@@ -49,7 +49,11 @@
 
         <div id="admin-nav-group" hidden>
           <div class="nav-section-label">管理后台</div>
-          <button type="button" class="nav-link" data-panel="admin-overview">全站管理（即将上线）</button>
+          <button type="button" class="nav-link" data-panel="admin-overview">全站概览</button>
+          <button type="button" class="nav-link" data-panel="admin-users">用户与套餐</button>
+          <button type="button" class="nav-link" data-panel="admin-codes">邀请码与兑换码</button>
+          <button type="button" class="nav-link" data-panel="admin-fleet">全站设备与审计</button>
+          <button type="button" class="nav-link" data-panel="admin-policy">系统策略</button>
         </div>
       </nav>
 
@@ -444,11 +448,194 @@
         </div>
       </section>
 
-      <!-- Admin Placeholder (for #24) -->
-      <section id="panel-admin-overview" class="panel" aria-label="全站管理" hidden>
+      <!-- Admin Panel 1: Site Overview -->
+      <section id="panel-admin-overview" class="panel" aria-label="全站概览" hidden>
+        <div class="kpi-grid usage-kpi-grid">
+          <article class="kpi-card">
+            <p class="kpi-label">全站用户</p>
+            <p id="admin-kpi-users" class="kpi-value">0</p>
+            <p id="admin-kpi-users-sub" class="kpi-sub">Pro 0 · Free 0</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">全站在线设备</p>
+            <p id="admin-kpi-devices" class="kpi-value">0</p>
+            <p id="admin-kpi-devices-sub" class="kpi-sub">共 0 台已配对设备</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">本月全站调用</p>
+            <p id="admin-kpi-calls" class="kpi-value">0</p>
+            <p id="admin-kpi-calls-sub" class="kpi-sub">有效计费 0 次</p>
+          </article>
+          <article class="kpi-card">
+            <p class="kpi-label">可用邀请与兑换码</p>
+            <p id="admin-kpi-codes" class="kpi-value">0</p>
+            <p id="admin-kpi-codes-sub" class="kpi-sub">已核销 0 次</p>
+          </article>
+        </div>
+
+        <div class="admin-quick-grid">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>成员与套餐治理</h2>
+                <p>查看所有 Google 注册账号，按需启停账号、强制踢下线或调整 Free/Pro 套餐与配额。</p>
+              </div>
+              <button type="button" class="secondary admin-jump" data-jump-panel="admin-users">前往用户管理</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2>邀请码与兑换码发行</h2>
+                <p>签发注册邀请码或批量生成 Pro 月/季/年/永久兑换码，随时作废并追踪核销记录。</p>
+              </div>
+              <button type="button" class="secondary admin-jump" data-jump-panel="admin-codes">前往发行中心</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Admin Panel 2: Users & Plans -->
+      <section id="panel-admin-users" class="panel" aria-label="用户与套餐" hidden>
         <div class="card">
-          <h2>管理员后台（#24 规划中）</h2>
-          <p class="subtle">你当前以管理员身份登录。用户管理、Free/Pro 套餐治理、邀请码与 Pro 兑换码、全站设备与审计监控将在 Issue #24 中接入此分组。</p>
+          <div class="card-head">
+            <div>
+              <h2>用户与套餐列表</h2>
+              <p>所有账号均通过 Google OIDC 注册登录；禁用账号或强制下线会立即吊销其控制台与 OAuth 会话。</p>
+            </div>
+            <div class="heading-actions filters">
+              <input id="admin-user-search" type="search" aria-label="搜索用户" placeholder="搜索邮箱、昵称或 ID">
+              <select id="admin-user-plan" aria-label="按套餐筛选">
+                <option value="">全部套餐</option>
+                <option value="free">Free</option>
+                <option value="pro">Pro</option>
+              </select>
+              <select id="admin-user-status" aria-label="按状态筛选">
+                <option value="">全部状态</option>
+                <option value="active">正常</option>
+                <option value="disabled">已禁用</option>
+              </select>
+            </div>
+          </div>
+          <div id="admin-users-list" class="device-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- Admin Panel 3: Invites & Redeem Codes -->
+      <section id="panel-admin-codes" class="panel" aria-label="邀请码与兑换码" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div class="segmented" role="tablist" aria-label="码管理视图切换">
+              <button type="button" class="seg-btn active" data-admin-codes="invites">注册邀请码</button>
+              <button type="button" class="seg-btn" data-admin-codes="redeem">Pro 兑换码</button>
+            </div>
+          </div>
+
+          <div id="admin-invites-view">
+            <form id="admin-invite-form" class="admin-form-grid">
+              <label>备注说明<input id="admin-invite-note" type="text" maxlength="120" placeholder="例如：团队新成员"></label>
+              <label>可用次数<input id="admin-invite-uses" type="number" min="1" max="1000" value="1" required></label>
+              <label>有效天数（留空永久）<input id="admin-invite-days" type="number" min="1" max="365" placeholder="例如：7"></label>
+              <div class="admin-form-submit"><button type="submit" class="primary">生成注册邀请码</button></div>
+            </form>
+            <div id="admin-invite-created" class="admin-created-box" hidden>
+              <strong>新生成的注册邀请码（仅显示一次，请妥善保存）</strong>
+              <div class="copy-field">
+                <code id="admin-invite-code-value"></code>
+                <button id="copy-admin-invite" type="button" class="secondary">复制</button>
+              </div>
+            </div>
+            <div id="admin-invites-list" class="device-list" aria-live="polite"></div>
+          </div>
+
+          <div id="admin-redeem-view" hidden>
+            <form id="admin-redeem-form" class="admin-form-grid">
+              <label>套餐时长
+                <select id="admin-redeem-tier">
+                  <option value="monthly">Pro 月卡（30 天）</option>
+                  <option value="quarterly">Pro 季卡（90 天）</option>
+                  <option value="yearly">Pro 年卡（365 天）</option>
+                  <option value="lifetime">Pro 永久卡</option>
+                </select>
+              </label>
+              <label>生成数量<input id="admin-redeem-count" type="number" min="1" max="20" value="1" required></label>
+              <label>单码可用人数<input id="admin-redeem-uses" type="number" min="1" max="10000" value="1" required></label>
+              <label>有效天数（留空永久）<input id="admin-redeem-days" type="number" min="1" max="3650" placeholder="例如：90"></label>
+              <label>备注说明<input id="admin-redeem-note" type="text" maxlength="120" placeholder="例如：内测福利"></label>
+              <div class="admin-form-submit"><button type="submit" class="primary">批量生成兑换码</button></div>
+            </form>
+            <div id="admin-redeem-created" class="admin-created-box" hidden>
+              <strong>新生成的 Pro 兑换码（仅显示一次，请立即复制分发）</strong>
+              <pre id="admin-redeem-codes-output" class="output"></pre>
+              <div class="heading-actions"><button id="copy-admin-redeem-codes" type="button" class="secondary">复制全部兑换码</button></div>
+            </div>
+            <div id="admin-redeem-codes-list" class="device-list" aria-live="polite"></div>
+            <div id="admin-redemptions-wrap" class="admin-sub-section">
+              <h3>全站近期核销记录</h3>
+              <div id="admin-redemptions-list" class="device-list" aria-live="polite"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Admin Panel 4: Fleet Devices & Global Audit -->
+      <section id="panel-admin-fleet" class="panel" aria-label="全站设备与审计" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div class="segmented" role="tablist" aria-label="全站监控视图切换">
+              <button type="button" class="seg-btn active" data-admin-fleet="devices">全站设备</button>
+              <button type="button" class="seg-btn" data-admin-fleet="audit">全站审计</button>
+            </div>
+            <div id="admin-fleet-device-filters" class="heading-actions filters">
+              <input id="admin-device-search" type="search" aria-label="搜索全站设备" placeholder="搜索设备名、ID 或归属邮箱">
+              <select id="admin-device-status" aria-label="按设备状态筛选">
+                <option value="">全部状态</option>
+                <option value="online">在线</option>
+                <option value="offline">离线</option>
+                <option value="revoked">已撤销</option>
+              </select>
+            </div>
+            <div id="admin-fleet-audit-filters" class="heading-actions filters" hidden>
+              <input id="admin-audit-search" type="search" aria-label="搜索全站审计" placeholder="搜索事件、用户邮箱或详情">
+            </div>
+          </div>
+
+          <div id="admin-fleet-devices-view">
+            <div id="admin-devices-list" class="device-list" aria-live="polite"></div>
+          </div>
+
+          <div id="admin-fleet-audit-view" class="table-wrap" hidden>
+            <table class="audit-table">
+              <thead><tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">详细信息（含操作人）</th></tr></thead>
+              <tbody id="admin-audit-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Admin Panel 5: System Policy -->
+      <section id="panel-admin-policy" class="panel" aria-label="系统策略" hidden>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>全局运行策略</h2>
+              <p>修改后立即生效（其中正文保留时长会同步作用于 Gateway 下一次定时维护周期）。</p>
+            </div>
+          </div>
+          <form id="admin-policy-form" class="admin-policy-form">
+            <label for="policy-reg-mode">新用户注册模式</label>
+            <select id="policy-reg-mode">
+              <option value="invite_only">仅凭管理员邀请码注册（invite_only）</option>
+              <option value="open">开放 Google 自动注册（open）</option>
+              <option value="closed">关闭新用户注册（closed）</option>
+            </select>
+            <label for="policy-free-quota">Free 套餐默认月度配额（次/月）</label>
+            <input id="policy-free-quota" type="number" min="1" max="10000000" required>
+            <label for="policy-result-ttl">终态任务正文短时保留时长（分钟，0 表示关闭提前清理）</label>
+            <input id="policy-result-ttl" type="number" min="0" max="525600" required>
+            <p id="admin-policy-feedback" class="subtle" role="status"></p>
+            <div class="dialog-actions"><button type="submit" class="primary">保存系统策略</button></div>
+          </form>
         </div>
       </section>
     </main>
@@ -614,6 +801,31 @@
     <h3>输出与结果</h3>
     <pre id="task-output" class="output"></pre>
     <div class="dialog-actions"><button id="cancel-task" type="button" class="danger">请求取消任务</button><button type="button" data-close class="secondary">关闭</button></div>
+  </dialog>
+
+  <!-- Admin User Plan Dialog -->
+  <dialog id="admin-plan-dialog" aria-labelledby="admin-plan-title">
+    <form id="admin-plan-form">
+      <div class="dialog-heading"><h2 id="admin-plan-title">调整用户套餐与配额</h2><button type="button" data-close class="icon-button" aria-label="关闭">×</button></div>
+      <p id="admin-plan-user-label" class="dialog-sub"></p>
+      <label for="admin-plan-select">目标套餐</label>
+      <select id="admin-plan-select">
+        <option value="free">Free（按月计费额度）</option>
+        <option value="pro">Pro（Unlimited 无限次）</option>
+      </select>
+      <div id="admin-plan-duration-wrap">
+        <label for="admin-plan-duration">Pro 授权时长</label>
+        <select id="admin-plan-duration">
+          <option value="permanent">永久有效</option>
+          <option value="30">顺延 30 天（月卡）</option>
+          <option value="90">顺延 90 天（季卡）</option>
+          <option value="365">顺延 365 天（年卡）</option>
+        </select>
+      </div>
+      <label for="admin-plan-custom-quota">单用户月度配额覆盖（仅 Free 生效，留空使用全站默认）</label>
+      <input id="admin-plan-custom-quota" type="number" min="1" max="10000000" placeholder="留空表示继承全站默认额度">
+      <div class="dialog-actions"><button type="button" data-close class="secondary">取消</button><button type="submit" class="primary">保存更改</button></div>
+    </form>
   </dialog>
 
   <!-- Generic Confirm / Rename Dialog -->

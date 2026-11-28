@@ -134,7 +134,7 @@ const oauth = new OAuth(store, {
   rateLimiter
 });
 const deviceFlow = new DeviceFlow(store, origin, rateLimiter);
-const dashboard = new Dashboard(store, { origin, googleEnabled: true, rateLimiter, monthlySoftQuota }, deviceFlow);
+const dashboard = new Dashboard(store, { origin, googleEnabled: true, rateLimiter, monthlySoftQuota, defaultResultTtlMinutes: resultTtlMinutes }, deviceFlow);
 const installer = new Installer(origin);
 const pinnedCatalog = catalog.parse(JSON.parse(readFileSync(new URL('../vendor/desktop-commander-full/catalog.json', import.meta.url), 'utf8')));
 const reviewUri = 'ui://remote-command/call-review.html';
@@ -420,9 +420,9 @@ const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, as
     return json(res, 500, { error: 'Internal server error.' });
   }
 });
-store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes);
+store.maintain(taskDays, auditDays, dcrClientDays, 210, store.getResultTtlMinutes(resultTtlMinutes));
 const cleanup = setInterval(() => {
-  try { store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes); } catch { logger.error('Gateway database maintenance failed.', true); }
+  try { store.maintain(taskDays, auditDays, dcrClientDays, 210, store.getResultTtlMinutes(resultTtlMinutes)); } catch { logger.error('Gateway database maintenance failed.', true); }
 }, 30000);
 cleanup.unref();
 server.listen(Number(env.PORT ?? 8787), bindHost, () => {
@@ -432,7 +432,7 @@ function shutdown() {
   if (draining) return;
   draining = true;
   clearInterval(cleanup);
-  store.maintain(taskDays, auditDays, dcrClientDays, 210, resultTtlMinutes);
+  store.maintain(taskDays, auditDays, dcrClientDays, 210, store.getResultTtlMinutes(resultTtlMinutes));
   const force = setTimeout(() => server.closeAllConnections(), 20000);
   force.unref();
   server.close(() => { clearTimeout(force); store.db.close(); });

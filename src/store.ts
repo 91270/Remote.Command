@@ -419,6 +419,43 @@ export class Store {
     return Number.isSafeInteger(n) && n >= 1 ? n : DEFAULT_FREE_MONTHLY_QUOTA;
   }
 
+  getResultTtlMinutes(fallback = 30): number {
+    const raw = this.getSetting('result_ttl_minutes');
+    if (raw === null || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n >= 0 && n <= 525600 ? n : fallback;
+  }
+
+  getSystemPolicies(fallbackResultTtl = 30): {
+    registrationMode: RegistrationMode;
+    freeMonthlyQuota: number;
+    resultTtlMinutes: number;
+  } {
+    return {
+      registrationMode: this.getRegistrationMode(),
+      freeMonthlyQuota: this.getDefaultFreeMonthlyQuota(),
+      resultTtlMinutes: this.getResultTtlMinutes(fallbackResultTtl)
+    };
+  }
+
+  updateSystemPolicies(
+    input: { registrationMode?: RegistrationMode; freeMonthlyQuota?: number; resultTtlMinutes?: number },
+    actorUserId: string,
+    fallbackResultTtl = 30
+  ) {
+    return this.tx(() => {
+      const now = Date.now();
+      const upsert = this.db.prepare(
+        'INSERT INTO system_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at'
+      );
+      if (input.registrationMode !== undefined) upsert.run('registration_mode', input.registrationMode, now);
+      if (input.freeMonthlyQuota !== undefined) upsert.run('free_monthly_quota', String(input.freeMonthlyQuota), now);
+      if (input.resultTtlMinutes !== undefined) upsert.run('result_ttl_minutes', String(input.resultTtlMinutes), now);
+      this.audit('admin_system_policies_updated', input, actorUserId);
+      return this.getSystemPolicies(fallbackResultTtl);
+    });
+  }
+
   billableMonthlyCalls(userId: string, now = Date.now()): number {
     const row = this.db.prepare('SELECT billable_calls FROM usage_monthly WHERE user_id=? AND month=?')
       .get(userId, utcMonthKey(now)) as { billable_calls: number } | undefined;
@@ -1780,5 +1817,384 @@ export class Store {
       createdAt: Number(row.created_at),
       lastUsedAt: row.last_used_at ? Number(row.last_used_at) : null
     };
+  }
+
+  // --- Admin Governance ---
+
+  private _revokeUserSessions(userId: string): number {
+    const res = this.db.prepare(
+      "DELETE FROM auth WHERE kind IN ('dashboard','access','code','refresh') AND json_extract(data,'$.userId')=?"
+    ).run(userId);
+    const prefix = `${userId}\0`;
+    for (const key of this.liveOAuthActivity.keys()) {
+      if (key.startsWith(prefix)) this.liveOAuthActivity.delete(key);
+    }
+    return Number(res.changes);
+  }
+
+  adminOverview(now = Date.now()) {
+    this.downgradeExpiredProUsers(now);
+    const d = new Date(now);
+    const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const since30d = now - 30 * day;
+    const month = utcMonthKey(now);
+
+    const userStats = this.db.prepare(
+      `SELECT
+        COUNT(*) AS total_users,
+        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_users,
+        SUM(CASE WHEN status='disabled' THEN 1 ELSE 0 END) AS disabled_users,
+        SUM(CASE WHEN plan='pro' THEN 1 ELSE 0 END) AS pro_users,
+        SUM(CASE WHEN plan='free' THEN 1 ELSE 0 END) AS free_users,
+        SUM(CASE WHEN role='admin' THEN 1 ELSE 0 END) AS admin_users
+      FROM users`
+    ).get() as Record<string, number | null>;
+
+    const allDevices = this.devices();
+    const activeDevices = allDevices.filter(dev => !dev.revoked);
+    const onlineDevices = activeDevices.filter(dev => dev.online).length;
+
+    const monthCalls = this.monthlyCalls(undefined, now);
+    const monthBillableRow = this.db.prepare('SELECT COALESCE(SUM(billable_calls),0) AS n FROM usage_monthly WHERE month=?')
+      .get(month) as { n: number };
+    const last30dRow = this.db.prepare('SELECT COUNT(*) AS n FROM usage_events WHERE created_at>=?')
+      .get(since30d) as { n: number };
+    const activeTasksRow = this.db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE status NOT IN ${doneSql}`)
+      .get() as { n: number };
+    const activeInvitesRow = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM registration_invites WHERE revoked=0 AND used_count<max_uses AND (expires_at IS NULL OR expires_at>?)'
+    ).get(now) as { n: number };
+    const activeCodesRow = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM redeem_codes WHERE revoked=0 AND used_count<max_uses AND (expires_at IS NULL OR expires_at>?)'
+    ).get(now) as { n: number };
+    const totalRedemptionsRow = this.db.prepare('SELECT COUNT(*) AS n FROM redeem_redemptions')
+      .get() as { n: number };
+
+    return {
+      users: {
+        total: Number(userStats.total_users ?? 0),
+        active: Number(userStats.active_users ?? 0),
+        disabled: Number(userStats.disabled_users ?? 0),
+        pro: Number(userStats.pro_users ?? 0),
+        free: Number(userStats.free_users ?? 0),
+        admin: Number(userStats.admin_users ?? 0)
+      },
+      devices: {
+        total: activeDevices.length,
+        online: onlineDevices,
+        offline: activeDevices.length - onlineDevices,
+        revoked: allDevices.length - activeDevices.length
+      },
+      usage: {
+        month,
+        monthStart: new Date(monthStart).toISOString(),
+        monthCalls,
+        monthBillableCalls: Number(monthBillableRow.n ?? 0),
+        last30dCalls: Number(last30dRow.n ?? 0),
+        activeTasks: Number(activeTasksRow.n ?? 0)
+      },
+      codes: {
+        activeInvites: Number(activeInvitesRow.n ?? 0),
+        activeRedeemCodes: Number(activeCodesRow.n ?? 0),
+        totalRedemptions: Number(totalRedemptionsRow.n ?? 0)
+      },
+      generatedAt: new Date(now).toISOString()
+    };
+  }
+
+  adminListUsers(options?: { search?: string; role?: string; status?: string; plan?: string; limit?: number; now?: number }) {
+    const now = options?.now ?? Date.now();
+    this.downgradeExpiredProUsers(now);
+    const month = utcMonthKey(now);
+    const defaultQuota = this.getDefaultFreeMonthlyQuota();
+
+    const rows = this.db.prepare('SELECT * FROM users ORDER BY created_at ASC').all() as Record<string, unknown>[];
+    const billableRows = this.db.prepare('SELECT user_id, billable_calls FROM usage_monthly WHERE month=?')
+      .all(month) as { user_id: string; billable_calls: number }[];
+    const billableMap = new Map(billableRows.map(r => [String(r.user_id), Number(r.billable_calls)]));
+
+    const deviceCounts = new Map<string, { total: number; online: number }>();
+    for (const dev of this.devices()) {
+      if (dev.revoked || !dev.userId) continue;
+      const cur = deviceCounts.get(dev.userId) ?? { total: 0, online: 0 };
+      cur.total++;
+      if (dev.online) cur.online++;
+      deviceCounts.set(dev.userId, cur);
+    }
+
+    const search = (options?.search ?? '').trim().toLowerCase();
+    const limit = Math.max(1, Math.min(200, options?.limit ?? 100));
+
+    const items = rows.map(row => {
+      const user = mapUser(row);
+      const devStat = deviceCounts.get(user.id) ?? { total: 0, online: 0 };
+      const billableCalls = billableMap.get(user.id) ?? 0;
+      return {
+        ...user,
+        planExpiresAt: user.planExpiresAt ? new Date(user.planExpiresAt).toISOString() : null,
+        effectiveQuota: user.plan === 'pro' ? null : (user.customMonthlyQuota ?? defaultQuota),
+        billableMonthlyCalls: billableCalls,
+        deviceCount: devStat.total,
+        onlineDeviceCount: devStat.online,
+        createdAt: new Date(Number(row.created_at)).toISOString(),
+        lastLoginAt: row.last_login_at ? new Date(Number(row.last_login_at)).toISOString() : null
+      };
+    }).filter(u => {
+      if (options?.role && u.role !== options.role) return false;
+      if (options?.status && u.status !== options.status) return false;
+      if (options?.plan && u.plan !== options.plan) return false;
+      if (search) {
+        const hay = `${u.email ?? ''} ${u.displayName ?? ''} ${u.id}`.toLowerCase();
+        if (!hay.includes(search)) return false;
+      }
+      return true;
+    });
+
+    return items.slice(0, limit);
+  }
+
+  adminSetUserStatus(targetUserId: string, status: 'active' | 'disabled', actorUserId: string) {
+    return this.tx(() => {
+      if (targetUserId === actorUserId && status === 'disabled') {
+        throw new Error('Cannot disable your own admin account.');
+      }
+      const target = this.findUserById(targetUserId);
+      if (!target) return null;
+      this.db.prepare('UPDATE users SET status=? WHERE id=?').run(status, targetUserId);
+      const revokedSessions = status === 'disabled' ? this._revokeUserSessions(targetUserId) : 0;
+      this.audit('admin_user_status_updated', {
+        targetUserId,
+        email: target.email,
+        status,
+        revokedSessions
+      }, actorUserId);
+      return {
+        user: this.findUserById(targetUserId)!,
+        revokedSessions
+      };
+    });
+  }
+
+  adminForceLogoutUser(targetUserId: string, actorUserId: string): { revokedSessions: number } | null {
+    return this.tx(() => {
+      const target = this.findUserById(targetUserId);
+      if (!target) return null;
+      const revokedSessions = this._revokeUserSessions(targetUserId);
+      this.audit('admin_user_force_logout', {
+        targetUserId,
+        email: target.email,
+        revokedSessions
+      }, actorUserId);
+      return { revokedSessions };
+    });
+  }
+
+  adminUpdateUserPlan(
+    targetUserId: string,
+    input: { plan: 'free' | 'pro'; durationDays?: number | null; customMonthlyQuota?: number | null; now?: number },
+    actorUserId: string
+  ): PlanQuotaStatus | null {
+    return this.tx(() => {
+      const now = input.now ?? Date.now();
+      this._downgradeExpiredProUsers(now, targetUserId);
+      const target = this.findUserById(targetUserId);
+      if (!target) return null;
+
+      let newExpiresAt: number | null = null;
+      if (input.plan === 'pro' && input.durationDays !== null && input.durationDays !== undefined) {
+        const base = target.plan === 'pro' && target.planExpiresAt ? Math.max(now, target.planExpiresAt) : now;
+        newExpiresAt = base + input.durationDays * day;
+      }
+
+      this.db.prepare('UPDATE users SET plan=?, plan_expires_at=? WHERE id=?').run(input.plan, newExpiresAt, targetUserId);
+      if (input.customMonthlyQuota !== undefined) {
+        this.db.prepare('UPDATE users SET custom_monthly_quota=? WHERE id=?').run(input.customMonthlyQuota, targetUserId);
+      }
+
+      this.audit('admin_user_plan_updated', {
+        targetUserId,
+        email: target.email,
+        previousPlan: target.plan,
+        newPlan: input.plan,
+        durationDays: input.durationDays ?? null,
+        newExpiresAt: newExpiresAt ? new Date(newExpiresAt).toISOString() : null,
+        ...(input.customMonthlyQuota !== undefined ? { customMonthlyQuota: input.customMonthlyQuota } : {})
+      }, actorUserId);
+
+      return this._buildUserPlanStatus(targetUserId, now)!;
+    });
+  }
+
+  adminListRegistrationInvites(limit = 100, now = Date.now()) {
+    const rows = this.db.prepare(
+      `SELECT r.*, u.email AS created_by_email
+       FROM registration_invites r
+       LEFT JOIN users u ON u.id = r.created_by
+       ORDER BY r.created_at DESC
+       LIMIT ?`
+    ).all(limit) as Record<string, unknown>[];
+    return rows.map(r => {
+      const expiresAt = r.expires_at !== null && r.expires_at !== undefined ? Number(r.expires_at) : null;
+      const revoked = Boolean(r.revoked);
+      const usedCount = Number(r.used_count ?? 0);
+      const maxUses = Number(r.max_uses ?? 1);
+      const active = !revoked && usedCount < maxUses && (expiresAt === null || expiresAt > now);
+      return {
+        codeHash: String(r.code_hash),
+        prefix: String(r.code_prefix),
+        note: r.note ? String(r.note) : null,
+        maxUses,
+        usedCount,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        revoked,
+        active,
+        createdByEmail: r.created_by_email ? String(r.created_by_email) : null,
+        createdAt: new Date(Number(r.created_at)).toISOString()
+      };
+    });
+  }
+
+  revokeRegistrationInvite(codeHash: string, actorUserId?: string): boolean {
+    return this.tx(() => {
+      const row = this.db.prepare('SELECT code_prefix FROM registration_invites WHERE code_hash=? AND revoked=0')
+        .get(codeHash) as { code_prefix: string } | undefined;
+      if (!row) return false;
+      this.db.prepare('UPDATE registration_invites SET revoked=1 WHERE code_hash=?').run(codeHash);
+      this.audit('registration_invite_revoked', { prefix: row.code_prefix }, actorUserId);
+      return true;
+    });
+  }
+
+  adminListRedeemCodes(limit = 100, now = Date.now()) {
+    const rows = this.db.prepare(
+      `SELECT c.*, u.email AS created_by_email
+       FROM redeem_codes c
+       LEFT JOIN users u ON u.id = c.created_by
+       ORDER BY c.created_at DESC
+       LIMIT ?`
+    ).all(limit) as Record<string, unknown>[];
+    return rows.map(r => {
+      const expiresAt = r.expires_at !== null && r.expires_at !== undefined ? Number(r.expires_at) : null;
+      const revoked = Boolean(r.revoked);
+      const usedCount = Number(r.used_count ?? 0);
+      const maxUses = Number(r.max_uses ?? 1);
+      const active = !revoked && usedCount < maxUses && (expiresAt === null || expiresAt > now);
+      return {
+        codeHash: String(r.code_hash),
+        prefix: String(r.code_prefix),
+        tier: (redeemTiers.some(t => t === r.tier) ? r.tier : 'monthly') as RedeemTier,
+        durationDays: r.duration_days !== null && r.duration_days !== undefined ? Number(r.duration_days) : null,
+        note: r.note ? String(r.note) : null,
+        maxUses,
+        usedCount,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        revoked,
+        active,
+        createdByEmail: r.created_by_email ? String(r.created_by_email) : null,
+        createdAt: new Date(Number(r.created_at)).toISOString()
+      };
+    });
+  }
+
+  adminListRedemptions(limit = 50) {
+    const rows = this.db.prepare(
+      `SELECT r.*, u.email AS user_email
+       FROM redeem_redemptions r
+       LEFT JOIN users u ON u.id = r.user_id
+       ORDER BY r.redeemed_at DESC, r.id DESC
+       LIMIT ?`
+    ).all(limit) as Record<string, unknown>[];
+    return rows.map(r => ({
+      id: Number(r.id),
+      codePrefix: String(r.code_prefix),
+      userId: String(r.user_id),
+      userEmail: r.user_email ? String(r.user_email) : null,
+      tier: (redeemTiers.some(t => t === r.tier) ? r.tier : 'monthly') as RedeemTier,
+      durationDays: r.duration_days !== null && r.duration_days !== undefined ? Number(r.duration_days) : null,
+      previousPlan: r.previous_plan === 'pro' ? 'pro' : 'free',
+      newPlan: r.new_plan === 'pro' ? 'pro' : 'free',
+      newExpiresAt: r.new_expires_at !== null && r.new_expires_at !== undefined ? new Date(Number(r.new_expires_at)).toISOString() : null,
+      redeemedAt: new Date(Number(r.redeemed_at)).toISOString()
+    }));
+  }
+
+  adminListDevices(options?: { search?: string; status?: string; limit?: number }) {
+    const userRows = this.db.prepare('SELECT id, email, display_name FROM users').all() as {
+      id: string; email: string | null; display_name: string | null;
+    }[];
+    const userMap = new Map(userRows.map(u => [String(u.id), u]));
+    const search = (options?.search ?? '').trim().toLowerCase();
+    const limit = Math.max(1, Math.min(500, options?.limit ?? 200));
+
+    return this.devices()
+      .map(dev => {
+        const owner = dev.userId ? userMap.get(dev.userId) : undefined;
+        return {
+          ...dev,
+          ownerEmail: owner?.email ? String(owner.email) : null,
+          ownerDisplayName: owner?.display_name ? String(owner.display_name) : null
+        };
+      })
+      .filter(dev => {
+        if (options?.status === 'online' && !dev.online) return false;
+        if (options?.status === 'offline' && (dev.online || dev.revoked)) return false;
+        if (options?.status === 'revoked' && !dev.revoked) return false;
+        if (search) {
+          const hay = `${dev.name} ${dev.id} ${dev.ownerEmail ?? ''} ${dev.ownerDisplayName ?? ''}`.toLowerCase();
+          if (!hay.includes(search)) return false;
+        }
+        return true;
+      })
+      .slice(0, limit);
+  }
+
+  adminRevokeDevice(deviceId: string, actorUserId: string): boolean {
+    return this.tx(() => {
+      const row = this.db.prepare('SELECT id, user_id, name FROM devices WHERE id=? AND revoked=0')
+        .get(deviceId) as { id: string; user_id: string | null; name: string } | undefined;
+      if (!row) return false;
+      this.db.prepare('UPDATE devices SET revoked=1, seen=0 WHERE id=?').run(deviceId);
+      this.liveSeen.delete(deviceId);
+      this.interruptRevokedDeviceTasks(deviceId);
+      this.audit('admin_device_revoked', {
+        device: deviceId,
+        name: row.name,
+        ownerUserId: row.user_id
+      }, actorUserId);
+      return true;
+    });
+  }
+
+  adminRecentAudit(options?: { limit?: number; event?: string; search?: string }) {
+    const limit = Math.max(1, Math.min(200, options?.limit ?? 100));
+    const eventFilter = (options?.event ?? '').trim();
+    const search = (options?.search ?? '').trim().toLowerCase();
+    const scanLimit = eventFilter || search ? 500 : limit;
+    const rows = this.db.prepare(
+      `SELECT a.id, a.user_id, a.at, a.event, a.details, u.email AS user_email
+       FROM audit a
+       LEFT JOIN users u ON u.id = a.user_id
+       ORDER BY a.id DESC
+       LIMIT ?`
+    ).all(scanLimit) as Record<string, unknown>[];
+
+    return rows
+      .map(row => ({
+        id: Number(row.id),
+        userId: row.user_id ? String(row.user_id) : null,
+        userEmail: row.user_email ? String(row.user_email) : null,
+        at: new Date(Number(row.at)).toISOString(),
+        event: String(row.event),
+        details: JSON.parse(String(row.details))
+      }))
+      .filter(row => {
+        if (eventFilter && row.event !== eventFilter) return false;
+        if (search) {
+          const hay = `${row.event} ${row.userEmail ?? ''} ${row.userId ?? ''} ${JSON.stringify(row.details)}`.toLowerCase();
+          if (!hay.includes(search)) return false;
+        }
+        return true;
+      })
+      .slice(0, limit);
   }
 }

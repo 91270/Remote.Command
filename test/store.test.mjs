@@ -484,3 +484,80 @@ test('schema v3->v4 migration, billable monthly metering, redeem codes, idempote
     assert.equal(auditText.includes(lifeCode.code), false);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });
+
+test('Store admin governance covers overview, users, sessions, plans, codes, fleet devices, audit, and live policies', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-admin-store-'));
+  const store = new Store(join(folder, 'gateway.sqlite'));
+  try {
+    const admin = store.createGoogleUser({
+      sub: 'sub-adm',
+      email: 'admin@example.com',
+      displayName: 'Admin',
+      avatarUrl: null,
+      adminEmails: new Set()
+    }).user;
+    store.setRegistrationMode('open', admin.id);
+    const bob = store.createGoogleUser({
+      sub: 'sub-bob',
+      email: 'bob@example.com',
+      displayName: 'Bob',
+      avatarUrl: null,
+      adminEmails: new Set()
+    }).user;
+
+    store.putAuth(secret(), 'dashboard', 3600000, { csrf: secret(), userId: bob.id, role: bob.role });
+    store.putAuth(secret(), 'access', 3600000, { userId: bob.id, clientId: 'c1' });
+    const devBob = store.pair(store.invite('Bob-PC', ['read'], bob.id), secret());
+    store.sync(devBob.id, randomUUID(), 'win32', []);
+
+    const inv = store.createRegistrationInvite(admin.id, { note: 'team', maxUses: 2 });
+    const red = store.createRedeemCode(admin.id, { tier: 'monthly', maxUses: 1, note: 'promo' });
+
+    const ov = store.adminOverview();
+    assert.equal(ov.users.total, 2);
+    assert.equal(ov.devices.online, 1);
+    assert.equal(ov.codes.activeInvites, 1);
+    assert.equal(ov.codes.activeRedeemCodes, 1);
+
+    const listedUsers = store.adminListUsers({ search: 'bob' });
+    assert.equal(listedUsers.length, 1);
+    assert.equal(listedUsers[0].deviceCount, 1);
+
+    assert.throws(() => store.adminSetUserStatus(admin.id, 'disabled', admin.id), /Cannot disable your own/);
+    const disabled = store.adminSetUserStatus(bob.id, 'disabled', admin.id);
+    assert.equal(disabled.user.status, 'disabled');
+    assert.equal(disabled.revokedSessions, 2);
+    assert.equal(store.adminSetUserStatus(bob.id, 'active', admin.id).user.status, 'active');
+
+    store.putAuth(secret(), 'dashboard', 3600000, { csrf: secret(), userId: bob.id, role: bob.role });
+    assert.equal(store.adminForceLogoutUser(bob.id, admin.id).revokedSessions, 1);
+
+    const updatedPlan = store.adminUpdateUserPlan(bob.id, { plan: 'pro', durationDays: 30, customMonthlyQuota: 50000 }, admin.id);
+    assert.equal(updatedPlan.plan, 'pro');
+    assert.ok(updatedPlan.planExpiresAt);
+    assert.equal(store.findUserById(bob.id).customMonthlyQuota, 50000);
+
+    const invites = store.adminListRegistrationInvites();
+    assert.equal(invites.length, 1);
+    assert.equal(store.revokeRegistrationInvite(invites[0].codeHash, admin.id), true);
+    assert.equal(store.adminListRegistrationInvites()[0].revoked, true);
+
+    assert.equal(store.redeemProCode(bob.id, red.code).status, 'ok');
+    assert.equal(store.adminListRedeemCodes().length, 1);
+    assert.equal(store.adminListRedemptions().length, 1);
+
+    const fleet = store.adminListDevices({ status: 'online' });
+    assert.equal(fleet.length, 1);
+    assert.equal(fleet[0].ownerEmail, 'bob@example.com');
+    assert.equal(store.adminRevokeDevice(devBob.id, admin.id), true);
+    assert.equal(store.devices(bob.id)[0].revoked, true);
+
+    const policies = store.updateSystemPolicies({ registrationMode: 'closed', freeMonthlyQuota: 20000, resultTtlMinutes: 12 }, admin.id, 30);
+    assert.deepEqual(policies, { registrationMode: 'closed', freeMonthlyQuota: 20000, resultTtlMinutes: 12 });
+    assert.equal(store.getResultTtlMinutes(30), 12);
+
+    const globalAudit = store.adminRecentAudit({ search: 'admin_' });
+    assert.equal(globalAudit.some(r => r.event === 'admin_device_revoked'), true);
+    assert.equal(globalAudit.some(r => r.event === 'admin_system_policies_updated'), true);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});

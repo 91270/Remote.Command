@@ -27,7 +27,11 @@ const panels = {
   plan: ['套餐与计费', '管理 Free（10,000 次/月）与 Pro（Unlimited）套餐权益。'],
   activity: ['任务与审计', '跟踪远程工具调用、本机审批与安全审计记录。'],
   settings: ['设置', '管理账号资料、外观主题与外部 OAuth 授权。'],
-  'admin-overview': ['全站管理', '管理员专属全站运营与安全治理视图。']
+  'admin-overview': ['全站概览', '查看全站用户、在线设备、月度调用与码券发放概况。'],
+  'admin-users': ['用户与套餐', '管理多租户成员状态、会话安全与 Free/Pro 套餐配额。'],
+  'admin-codes': ['邀请码与兑换码', '生成与作废注册邀请码及 Pro 兑换码，查看全站核销流水。'],
+  'admin-fleet': ['全站设备与审计', '跨租户设备在线监控、紧急撤销与全站操作审计检索。'],
+  'admin-policy': ['系统策略', '配置注册准入策略、默认月度配额与任务正文短时保留时长。']
 };
 
 let csrf = '';
@@ -46,6 +50,9 @@ const tierLabels = {
   lifetime: 'Pro 永久卡'
 };
 let activeActivity = 'tasks';
+let activeAdminCodes = 'invites';
+let activeAdminFleet = 'devices';
+let adminPlanTargetUserId = '';
 let activePromptCat = 'inspect';
 const promptTemplates = {
   inspect: [
@@ -283,6 +290,11 @@ function showLogin() {
   currentSession = null;
   currentPlanQuota = null;
   usageData = null;
+  adminPlanTargetUserId = '';
+  const invCreated = byId('admin-invite-created');
+  if (invCreated) invCreated.hidden = true;
+  const redCreated = byId('admin-redeem-created');
+  if (redCreated) redCreated.hidden = true;
   byId('notice').hidden = true;
   byId('login-error').textContent = '';
   const boot = byId('auth-boot');
@@ -353,6 +365,7 @@ async function showApp(session) {
 
 function switchPanel(name) {
   if (!panels[name]) return;
+  if (name.startsWith('admin-') && currentSession?.role !== 'admin') return;
   activePanel = name;
   byId('page-title').textContent = panels[name][0];
   byId('page-description').textContent = panels[name][1];
@@ -1177,6 +1190,257 @@ function renderPromptLibrary() {
   }
 }
 
+// --- Admin Console Rendering & Actions ---
+async function refreshAdminOverview() {
+  const ov = await api('admin/overview');
+  byId('admin-kpi-users').textContent = Number(ov.users.total || 0).toLocaleString();
+  byId('admin-kpi-users-sub').textContent = `Pro ${ov.users.pro} · Free ${ov.users.free} · 禁用 ${ov.users.disabled}`;
+  byId('admin-kpi-devices').textContent = Number(ov.devices.online || 0).toLocaleString();
+  byId('admin-kpi-devices-sub').textContent = `已配对 ${ov.devices.total} 台（离线 ${ov.devices.offline} · 已撤销 ${ov.devices.revoked}）`;
+  byId('admin-kpi-calls').textContent = Number(ov.usage.monthCalls || 0).toLocaleString();
+  byId('admin-kpi-calls-sub').textContent = `有效计费 ${Number(ov.usage.monthBillableCalls || 0).toLocaleString()} · 进行中 ${ov.usage.activeTasks || 0}`;
+  const totalActiveCodes = (ov.codes.activeInvites || 0) + (ov.codes.activeRedeemCodes || 0);
+  byId('admin-kpi-codes').textContent = totalActiveCodes.toLocaleString();
+  byId('admin-kpi-codes-sub').textContent = `邀请码 ${ov.codes.activeInvites} · 兑换码 ${ov.codes.activeRedeemCodes} · 已核销 ${ov.codes.totalRedemptions}`;
+}
+
+function openAdminPlanModal(user) {
+  adminPlanTargetUserId = user.id;
+  byId('admin-plan-user-label').textContent = `目标账号：${user.email || user.displayName || user.id}`;
+  const planSel = byId('admin-plan-select');
+  planSel.value = user.plan === 'pro' ? 'pro' : 'free';
+  byId('admin-plan-duration').value = '30';
+  byId('admin-plan-duration-wrap').hidden = planSel.value !== 'pro';
+  byId('admin-plan-custom-quota').value = user.customMonthlyQuota ? String(user.customMonthlyQuota) : '';
+  byId('admin-plan-dialog').showModal();
+}
+
+async function refreshAdminUsers() {
+  const qs = new URLSearchParams();
+  const q = byId('admin-user-search').value.trim();
+  const plan = byId('admin-user-plan').value;
+  const status = byId('admin-user-status').value;
+  if (q) qs.set('q', q);
+  if (plan) qs.set('plan', plan);
+  if (status) qs.set('status', status);
+  const { users } = await api('admin/users' + (qs.size ? '?' + qs.toString() : ''));
+  const container = byId('admin-users-list');
+  container.replaceChildren();
+  if (!users.length) {
+    container.appendChild(node('div', 'empty-state', '没有匹配的用户账号。'));
+    return;
+  }
+  for (const u of users) {
+    const row = node('div', 'device-row');
+    const main = node('div', 'device-main');
+    main.appendChild(node('span', 'status-dot' + (u.status === 'active' ? ' online' : '')));
+    const info = node('div', 'device-info');
+    const title = node('div', 'device-name');
+    title.appendChild(node('span', '', u.email || u.displayName || u.id));
+    title.appendChild(node('span', 'pill' + (u.role === 'admin' ? ' online' : ''), u.role === 'admin' ? '管理员' : '用户'));
+    title.appendChild(node('span', 'pill' + (u.plan === 'pro' ? ' online' : ''), u.plan === 'pro' ? 'Pro' : 'Free'));
+    if (u.status === 'disabled') title.appendChild(node('span', 'pill revoked', '已禁用'));
+    info.appendChild(title);
+
+    const quotaDesc = u.plan === 'pro'
+      ? (u.planExpiresAt ? `到期 ${formatTime(u.planExpiresAt)}` : '永久 Pro')
+      : `本月 ${u.billableMonthlyCalls.toLocaleString()} / ${(u.effectiveQuota || FREE_QUOTA).toLocaleString()}${u.customMonthlyQuota ? '（自定义配额）' : ''}`;
+    info.appendChild(node('div', 'device-meta', `${quotaDesc} · 设备 ${u.onlineDeviceCount}/${u.deviceCount} · 最近登录 ${u.lastLoginAt ? relativeTime(u.lastLoginAt) : '从未'}`));
+    main.appendChild(info);
+
+    const actions = node('div', 'device-actions admin-actions');
+    actions.appendChild(button('套餐/配额', 'secondary', () => openAdminPlanModal(u)));
+    actions.appendChild(button('踢下线', 'secondary', async () => {
+      if (!await confirmAction('强制踢下线', `确认吊销「${u.email || u.id}」的所有控制台与 OAuth 会话？`)) return;
+      const res = await api(`admin/users/${u.id}/force-logout`, {});
+      notice(`已吊销该用户 ${res.revokedSessions} 个活跃会话。`);
+      await refreshAdminUsers();
+    }));
+    if (u.id !== currentSession?.userId) {
+      const nextStatus = u.status === 'active' ? 'disabled' : 'active';
+      actions.appendChild(button(u.status === 'active' ? '禁用' : '启用', u.status === 'active' ? 'danger' : 'primary', async () => {
+        if (!await confirmAction(
+          u.status === 'active' ? '禁用用户账号' : '启用用户账号',
+          u.status === 'active'
+            ? `禁用后「${u.email || u.id}」将无法登录且现有会话立即失效。`
+            : `恢复「${u.email || u.id}」的正常登录权限。`
+        )) return;
+        await api(`admin/users/${u.id}/status`, { status: nextStatus });
+        notice(`已${nextStatus === 'disabled' ? '禁用' : '启用'}账号「${u.email || u.id}」。`);
+        await refreshAdminUsers();
+      }));
+    }
+    row.append(main, actions);
+    container.appendChild(row);
+  }
+}
+
+async function refreshAdminCodes() {
+  if (activeAdminCodes === 'invites') {
+    const { invites } = await api('admin/invites');
+    const list = byId('admin-invites-list');
+    list.replaceChildren();
+    if (!invites.length) {
+      list.appendChild(node('div', 'empty-state', '暂无注册邀请码。'));
+      return;
+    }
+    for (const inv of invites) {
+      const row = node('div', 'device-row');
+      const main = node('div', 'device-main');
+      const info = node('div', 'device-info');
+      const title = node('div', 'device-name');
+      title.append(
+        node('code', '', `${inv.prefix}***`),
+        node('span', 'pill' + (inv.active ? ' online' : inv.revoked ? ' revoked' : ''), inv.revoked ? '已作废' : inv.active ? '有效' : '已用完/过期')
+      );
+      if (inv.note) title.appendChild(node('span', 'pill', inv.note));
+      info.appendChild(title);
+      info.appendChild(node('div', 'device-meta', `已用 ${inv.usedCount}/${inv.maxUses} · ${inv.expiresAt ? '到期 ' + formatTime(inv.expiresAt) : '永久有效'} · 创建人 ${inv.createdByEmail || '系统'}`));
+      main.appendChild(info);
+      const actions = node('div', 'device-actions');
+      if (!inv.revoked) {
+        actions.appendChild(button('作废', 'danger', async () => {
+          await api(`admin/invites/${inv.codeHash}/revoke`, {});
+          notice(`已作废邀请码 ${inv.prefix}***。`);
+          await refreshAdminCodes();
+        }));
+      }
+      row.append(main, actions);
+      list.appendChild(row);
+    }
+    return;
+  }
+
+  const { codes, redemptions } = await api('admin/redeem-codes');
+  const codeList = byId('admin-redeem-codes-list');
+  codeList.replaceChildren();
+  if (!codes.length) {
+    codeList.appendChild(node('div', 'empty-state', '暂无 Pro 兑换码。'));
+  } else {
+    for (const c of codes) {
+      const row = node('div', 'device-row');
+      const main = node('div', 'device-main');
+      const info = node('div', 'device-info');
+      const title = node('div', 'device-name');
+      title.append(
+        node('code', '', `${c.prefix}***`),
+        node('span', 'pill', tierLabels[c.tier] || c.tier),
+        node('span', 'pill' + (c.active ? ' online' : c.revoked ? ' revoked' : ''), c.revoked ? '已作废' : c.active ? '有效' : '已用完/过期')
+      );
+      if (c.note) title.appendChild(node('span', 'pill', c.note));
+      info.appendChild(title);
+      info.appendChild(node('div', 'device-meta', `已用 ${c.usedCount}/${c.maxUses} · ${c.expiresAt ? '到期 ' + formatTime(c.expiresAt) : '码本身永久有效'} · 创建人 ${c.createdByEmail || '系统'}`));
+      main.appendChild(info);
+      const actions = node('div', 'device-actions');
+      if (!c.revoked) {
+        actions.appendChild(button('作废', 'danger', async () => {
+          await api(`admin/redeem-codes/${c.codeHash}/revoke`, {});
+          notice(`已作废兑换码 ${c.prefix}***。`);
+          await refreshAdminCodes();
+        }));
+      }
+      row.append(main, actions);
+      codeList.appendChild(row);
+    }
+  }
+
+  const redList = byId('admin-redemptions-list');
+  redList.replaceChildren();
+  if (!redemptions.length) {
+    redList.appendChild(node('div', 'empty-state', '暂无核销记录。'));
+  } else {
+    for (const r of redemptions) {
+      const row = node('div', 'device-row');
+      const main = node('div', 'device-main');
+      const info = node('div', 'device-info');
+      const title = node('div', 'device-name');
+      title.append(
+        node('code', '', `${r.codePrefix}***`),
+        node('span', 'pill online', tierLabels[r.tier] || r.tier),
+        node('span', '', r.userEmail || r.userId)
+      );
+      info.appendChild(title);
+      info.appendChild(node('div', 'device-meta', `核销于 ${formatTime(r.redeemedAt)} · ${r.newExpiresAt ? '新到期 ' + formatTime(r.newExpiresAt) : '永久 Pro'}`));
+      main.appendChild(info);
+      row.appendChild(main);
+      redList.appendChild(row);
+    }
+  }
+}
+
+async function refreshAdminFleet() {
+  if (activeAdminFleet === 'devices') {
+    const qs = new URLSearchParams();
+    const q = byId('admin-device-search').value.trim();
+    const status = byId('admin-device-status').value;
+    if (q) qs.set('q', q);
+    if (status) qs.set('status', status);
+    const { devices: fleet } = await api('admin/devices' + (qs.size ? '?' + qs.toString() : ''));
+    const container = byId('admin-devices-list');
+    container.replaceChildren();
+    if (!fleet.length) {
+      container.appendChild(node('div', 'empty-state', '没有匹配的设备。'));
+      return;
+    }
+    for (const d of fleet) {
+      const row = node('div', 'device-row');
+      const main = node('div', 'device-main');
+      main.appendChild(node('span', 'status-dot' + (d.online ? ' online' : '')));
+      const info = node('div', 'device-info');
+      const title = node('div', 'device-name');
+      title.appendChild(node('span', '', d.name));
+      if (d.platform) title.appendChild(node('span', 'pill', platformNames[d.platform] || d.platform));
+      title.appendChild(node('span', 'pill ' + (d.revoked ? 'revoked' : d.online ? 'online' : ''), d.revoked ? '已撤销' : d.online ? 'Online' : 'Offline'));
+      info.appendChild(title);
+      info.appendChild(node('div', 'device-meta', `归属：${d.ownerEmail || d.userId || '未知'} · ID: ${d.id.slice(0, 8)} · ${d.online ? '当前在线' : '最后在线 ' + relativeTime(d.lastSeen)}`));
+      main.appendChild(info);
+      const actions = node('div', 'device-actions');
+      if (!d.revoked) {
+        actions.appendChild(button('紧急撤销', 'danger', async () => {
+          if (!await confirmAction('紧急撤销设备', `确认跨租户紧急撤销「${d.ownerEmail || '未知用户'}」的设备「${d.name}」？`)) return;
+          await api(`admin/devices/${d.id}/revoke`, {});
+          notice(`已紧急撤销设备「${d.name}」。`);
+          await refreshAdminFleet();
+        }));
+      }
+      row.append(main, actions);
+      container.appendChild(row);
+    }
+    return;
+  }
+
+  const q = byId('admin-audit-search').value.trim();
+  const qs = q ? '?q=' + encodeURIComponent(q) : '';
+  const { records } = await api('admin/audit' + qs);
+  const tbody = byId('admin-audit-tbody');
+  tbody.replaceChildren();
+  if (!records.length) {
+    const tr = document.createElement('tr');
+    const td = node('td', 'subtle', '暂无审计记录。');
+    td.colSpan = 3;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const r of records) {
+    const tr = document.createElement('tr');
+    const eventTd = node('td', 'audit-event');
+    eventTd.appendChild(node('code', '', r.event));
+    const detailsObj = r.userEmail ? { actor: r.userEmail, ...r.details } : r.details;
+    const detailsTd = node('td', 'audit-details-cell');
+    detailsTd.appendChild(node('code', 'audit-details', formatAuditDetails(detailsObj)));
+    tr.append(node('td', 'tabular audit-time', formatTime(r.at)), eventTd, detailsTd);
+    tbody.appendChild(tr);
+  }
+}
+
+async function refreshAdminPolicy() {
+  const s = await api('admin/settings');
+  byId('policy-reg-mode').value = s.registrationMode;
+  byId('policy-free-quota').value = String(s.freeMonthlyQuota);
+  byId('policy-result-ttl').value = String(s.resultTtlMinutes);
+}
+
 // --- Main Refresh ---
 async function refresh() {
   if (!csrf || refreshing) return;
@@ -1211,6 +1475,16 @@ async function refresh() {
       }
     } else if (activePanel === 'settings') {
       await refreshOAuthClients();
+    } else if (activePanel === 'admin-overview' && currentSession?.role === 'admin') {
+      await refreshAdminOverview();
+    } else if (activePanel === 'admin-users' && currentSession?.role === 'admin') {
+      await refreshAdminUsers();
+    } else if (activePanel === 'admin-codes' && currentSession?.role === 'admin') {
+      await refreshAdminCodes();
+    } else if (activePanel === 'admin-fleet' && currentSession?.role === 'admin') {
+      await refreshAdminFleet();
+    } else if (activePanel === 'admin-policy' && currentSession?.role === 'admin') {
+      await refreshAdminPolicy();
     }
   } finally {
     refreshing = false;
@@ -1471,6 +1745,122 @@ byId('device-status').addEventListener('change', renderDevices);
 byId('audit-search').addEventListener('input', renderAudit);
 byId('refresh-now').addEventListener('click', () => act(refresh));
 document.querySelectorAll('[data-close]').forEach(close => close.addEventListener('click', () => close.closest('dialog').close()));
+
+// --- Admin Console Event Bindings ---
+document.querySelectorAll('.admin-jump').forEach(btn => {
+  btn.addEventListener('click', () => {
+    switchPanel(btn.dataset.jumpPanel);
+    act(refresh);
+  });
+});
+
+document.querySelectorAll('[data-admin-codes]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeAdminCodes = btn.dataset.adminCodes === 'redeem' ? 'redeem' : 'invites';
+    document.querySelectorAll('[data-admin-codes]').forEach(b => b.classList.toggle('active', b === btn));
+    byId('admin-invites-view').hidden = activeAdminCodes !== 'invites';
+    byId('admin-redeem-view').hidden = activeAdminCodes !== 'redeem';
+    act(refreshAdminCodes);
+  });
+});
+
+document.querySelectorAll('[data-admin-fleet]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeAdminFleet = btn.dataset.adminFleet === 'audit' ? 'audit' : 'devices';
+    document.querySelectorAll('[data-admin-fleet]').forEach(b => b.classList.toggle('active', b === btn));
+    byId('admin-fleet-devices-view').hidden = activeAdminFleet !== 'devices';
+    byId('admin-fleet-device-filters').hidden = activeAdminFleet !== 'devices';
+    byId('admin-fleet-audit-view').hidden = activeAdminFleet !== 'audit';
+    byId('admin-fleet-audit-filters').hidden = activeAdminFleet !== 'audit';
+    act(refreshAdminFleet);
+  });
+});
+
+byId('admin-user-search').addEventListener('input', () => act(refreshAdminUsers));
+byId('admin-user-plan').addEventListener('change', () => act(refreshAdminUsers));
+byId('admin-user-status').addEventListener('change', () => act(refreshAdminUsers));
+byId('admin-device-search').addEventListener('input', () => act(refreshAdminFleet));
+byId('admin-device-status').addEventListener('change', () => act(refreshAdminFleet));
+byId('admin-audit-search').addEventListener('input', () => act(refreshAdminFleet));
+
+byId('admin-plan-select').addEventListener('change', () => {
+  byId('admin-plan-duration-wrap').hidden = byId('admin-plan-select').value !== 'pro';
+});
+
+byId('admin-plan-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!adminPlanTargetUserId) return;
+  act(async () => {
+    const plan = byId('admin-plan-select').value === 'pro' ? 'pro' : 'free';
+    const durVal = byId('admin-plan-duration').value;
+    const durationDays = plan === 'pro' ? (durVal === 'permanent' ? null : Number(durVal)) : null;
+    const customRaw = byId('admin-plan-custom-quota').value.trim();
+    const customMonthlyQuota = customRaw ? Number(customRaw) : null;
+    await api(`admin/users/${adminPlanTargetUserId}/plan`, { plan, durationDays, customMonthlyQuota });
+    byId('admin-plan-dialog').close();
+    notice('已更新用户套餐与配额设置。');
+    await refresh();
+  });
+});
+
+byId('admin-invite-form').addEventListener('submit', event => {
+  event.preventDefault();
+  act(async () => {
+    const note = byId('admin-invite-note').value.trim();
+    const maxUses = Number(byId('admin-invite-uses').value || 1);
+    const daysRaw = byId('admin-invite-days').value.trim();
+    const expiresInDays = daysRaw ? Number(daysRaw) : null;
+    const { invite } = await api('admin/invites', { ...(note ? { note } : {}), maxUses, expiresInDays });
+    byId('admin-invite-code-value').textContent = invite.code;
+    byId('admin-invite-created').hidden = false;
+    byId('admin-invite-form').reset();
+    byId('admin-invite-uses').value = '1';
+    notice('已生成新的注册邀请码。');
+    await refreshAdminCodes();
+  });
+});
+byId('copy-admin-invite').addEventListener('click', () => act(() => copyElement('admin-invite-code-value', '已复制注册邀请码。')));
+
+byId('admin-redeem-form').addEventListener('submit', event => {
+  event.preventDefault();
+  act(async () => {
+    const tier = byId('admin-redeem-tier').value;
+    const count = Number(byId('admin-redeem-count').value || 1);
+    const maxUses = Number(byId('admin-redeem-uses').value || 1);
+    const daysRaw = byId('admin-redeem-days').value.trim();
+    const expiresInDays = daysRaw ? Number(daysRaw) : null;
+    const note = byId('admin-redeem-note').value.trim();
+    const { codes } = await api('admin/redeem-codes', {
+      tier,
+      count,
+      maxUses,
+      expiresInDays,
+      ...(note ? { note } : {})
+    });
+    byId('admin-redeem-codes-output').textContent = codes.map(c => c.code).join('\n');
+    byId('admin-redeem-created').hidden = false;
+    byId('admin-redeem-form').reset();
+    byId('admin-redeem-count').value = '1';
+    byId('admin-redeem-uses').value = '1';
+    notice(`已成功生成 ${codes.length} 枚 Pro 兑换码。`);
+    await refreshAdminCodes();
+  });
+});
+byId('copy-admin-redeem-codes').addEventListener('click', () => act(() => copyElement('admin-redeem-codes-output', '已复制全部 Pro 兑换码。')));
+
+byId('admin-policy-form').addEventListener('submit', event => {
+  event.preventDefault();
+  const feedback = byId('admin-policy-feedback');
+  act(async () => {
+    const registrationMode = byId('policy-reg-mode').value;
+    const freeMonthlyQuota = Number(byId('policy-free-quota').value);
+    const resultTtlMinutes = Number(byId('policy-result-ttl').value);
+    await api('admin/settings', { registrationMode, freeMonthlyQuota, resultTtlMinutes });
+    feedback.textContent = '系统策略已保存并立即生效。';
+    notice('系统策略已更新。');
+    await refresh();
+  });
+});
 
 renderPromptLibrary();
 

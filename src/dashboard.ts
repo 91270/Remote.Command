@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
+import { handleAdminApi } from './admin-api.js';
 import { HttpError, json, readJson } from './http.js';
 import { approvalModes, capabilities, match, secret, terminal, uuid, type ApprovalMode, type Capability } from './protocol.js';
 import { ipDigest, type RateLimiter } from './rate-limit.js';
@@ -19,7 +20,7 @@ const assets = new Map([
   ['/assets/landing.js', ['landing.js', 'text/javascript; charset=utf-8']]
 ]);
 
-type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: RateLimiter; monthlySoftQuota?: number | null };
+type DashboardConfig = { origin: string; googleEnabled?: boolean; rateLimiter?: RateLimiter; monthlySoftQuota?: number | null; defaultResultTtlMinutes?: number };
 type Session = { digest: string; csrf: string; user: UserRecord };
 type DeviceVerification = {
   preview(code: string): { deviceName: string; expiresAt: string } | undefined;
@@ -103,6 +104,15 @@ export class Dashboard {
         throw new HttpError(403, 'CSRF token is missing or invalid.');
 
       const userId = session.user.id;
+
+      if (url.pathname.startsWith('/manage/api/admin/')) {
+        if (session.user.role !== 'admin') throw new HttpError(403, 'Administrator access required.');
+        return await handleAdminApi(req, res, url, {
+          store: this.store,
+          actor: session.user,
+          defaultResultTtlMinutes: this.config.defaultResultTtlMinutes ?? 30
+        });
+      }
 
       if (req.method === 'GET' && url.pathname === '/manage/api/session') {
         const planQuota = this.store.getUserPlanStatus(userId);

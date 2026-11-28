@@ -78,6 +78,11 @@ test('management dashboard Google session auth, CSRF, pairing, rename, tasks, au
     assert.match(html, /id="task-purged-notice"/);
     assert.match(html, /id="redeem-form"/);
     assert.match(html, /id="redeem-code-input"/);
+    assert.match(html, /id="panel-admin-overview"/);
+    assert.match(html, /id="panel-admin-users"/);
+    assert.match(html, /id="panel-admin-codes"/);
+    assert.match(html, /id="panel-admin-fleet"/);
+    assert.match(html, /id="panel-admin-policy"/);
     assert.match(html, /class="tasks-table"/);
     assert.match(html, /class="audit-table"/);
     assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
@@ -916,6 +921,151 @@ test('dashboard /manage/api/plan and /manage/api/plan/redeem enforce CSRF, rate 
     const rlRes = await callApi('/api/plan/redeem', { code: validCode.code });
     assert.equal(rlRes.status, 429);
     assert.ok(Number(rlRes.headers.get('retry-after')) >= 1);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    store.db.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('dashboard /manage/api/admin/* strictly enforces 403 for regular users and full CRUD governance for admins', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-admin-api-'));
+  const store = new Store(join(temp, 'gateway.sqlite'));
+  const adminRes = store.createGoogleUser({ sub: 'sub-adm-api', email: 'adm-api@example.com', displayName: 'Admin', avatarUrl: null, adminEmails: new Set() });
+  store.setRegistrationMode('open');
+  const userRes = store.createGoogleUser({ sub: 'sub-usr-api', email: 'usr-api@example.com', displayName: 'User', avatarUrl: null, adminEmails: new Set() });
+  const admin = adminRes.user;
+  const user = userRes.user;
+
+  const server = createServer(async (req, res) => {
+    try {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const d = new Dashboard(store, { origin, defaultResultTtlMinutes: 30 });
+      if (!await d.route(req, res, new URL(req.url, origin))) res.writeHead(404).end();
+    } catch { res.writeHead(500).end('Internal failure'); }
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const origin = 'http://127.0.0.1:' + server.address().port;
+
+  const mint = u => {
+    const token = secret();
+    const csrf = secret();
+    store.putAuth(token, 'dashboard', 3600000, { csrf, userId: u.id, username: u.email, role: u.role });
+    return (path, data, overrides = {}) => fetch(origin + '/manage' + path, {
+      ...(data !== undefined && { method: 'POST', body: JSON.stringify(data) }),
+      headers: {
+        Cookie: `rcm_dashboard=${token}`,
+        ...(data !== undefined && { Origin: origin, 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }),
+        ...overrides
+      }
+    });
+  };
+
+  let asAdmin = mint(admin);
+  let asUser = mint(user);
+
+  try {
+    const userDev = store.pair(store.invite('User-Mac', ['read'], user.id), secret());
+    store.sync(userDev.id, randomUUID(), 'darwin', []);
+
+    // Regular user MUST receive 403 Forbidden on every /manage/api/admin/* route
+    const forbiddenChecks = [
+      ['/api/admin/overview'],
+      ['/api/admin/users'],
+      [`/api/admin/users/${user.id}/status`, { status: 'disabled' }],
+      [`/api/admin/users/${user.id}/force-logout`, {}],
+      [`/api/admin/users/${user.id}/plan`, { plan: 'pro', durationDays: 30 }],
+      ['/api/admin/invites'],
+      ['/api/admin/invites', { maxUses: 1 }],
+      ['/api/admin/redeem-codes'],
+      ['/api/admin/redeem-codes', { tier: 'monthly', count: 1 }],
+      ['/api/admin/devices'],
+      [`/api/admin/devices/${userDev.id}/revoke`, {}],
+      ['/api/admin/audit'],
+      ['/api/admin/settings'],
+      ['/api/admin/settings', { registrationMode: 'closed' }]
+    ];
+    for (const [path, body] of forbiddenChecks) {
+      const res = await asUser(path, body);
+      assert.equal(res.status, 403, `Expected 403 for regular user on ${path}, got ${res.status}`);
+    }
+
+    // Admin overview & user search
+    const ov = await (await asAdmin('/api/admin/overview')).json();
+    assert.equal(ov.users.total, 2);
+    assert.equal(ov.devices.online, 1);
+
+    const searched = await (await asAdmin('/api/admin/users?q=usr-api')).json();
+    assert.equal(searched.users.length, 1);
+    assert.equal(searched.users[0].id, user.id);
+
+    // Self-disable forbidden (400)
+    assert.equal((await asAdmin(`/api/admin/users/${admin.id}/status`, { status: 'disabled' })).status, 400);
+
+    // Disable regular user -> existing session immediately invalidates (401)
+    const disableRes = await asAdmin(`/api/admin/users/${user.id}/status`, { status: 'disabled' });
+    assert.equal(disableRes.status, 200);
+    assert.equal((await asUser('/api/session')).status, 401);
+
+    // Re-enable user, mint fresh session, then force-logout -> session returns 401
+    assert.equal((await asAdmin(`/api/admin/users/${user.id}/status`, { status: 'active' })).status, 200);
+    asUser = mint(user);
+    assert.equal((await asUser('/api/session')).status, 200);
+    const forceRes = await asAdmin(`/api/admin/users/${user.id}/force-logout`, {});
+    assert.equal(forceRes.status, 200);
+    assert.equal((await forceRes.json()).revokedSessions, 1);
+    assert.equal((await asUser('/api/session')).status, 401);
+
+    // Admin upgrades user to Pro + custom monthly quota, then downgrades back to Free
+    const upRes = await asAdmin(`/api/admin/users/${user.id}/plan`, { plan: 'pro', durationDays: 90, customMonthlyQuota: 25000 });
+    assert.equal(upRes.status, 200);
+    assert.equal((await upRes.json()).planQuota.plan, 'pro');
+    const downRes = await asAdmin(`/api/admin/users/${user.id}/plan`, { plan: 'free', customMonthlyQuota: 25000 });
+    assert.equal(downRes.status, 200);
+    assert.equal((await downRes.json()).planQuota.limit, 25000);
+
+    // Registration invite create & revoke
+    const invCreate = await (await asAdmin('/api/admin/invites', { note: 'qa', maxUses: 2, expiresInDays: 7 })).json();
+    assert.ok(invCreate.invite.code);
+    const invList = await (await asAdmin('/api/admin/invites')).json();
+    assert.equal(invList.invites.length, 1);
+    assert.equal(JSON.stringify(invList).includes(invCreate.invite.code), false);
+    assert.equal((await asAdmin(`/api/admin/invites/${invList.invites[0].codeHash}/revoke`, {})).status, 200);
+
+    // Batch generate 2 Pro redeem codes, revoke 1, user redeems the other
+    const batch = await (await asAdmin('/api/admin/redeem-codes', { tier: 'monthly', count: 2, maxUses: 1, note: 'vip' })).json();
+    assert.equal(batch.codes.length, 2);
+    const codeList = await (await asAdmin('/api/admin/redeem-codes')).json();
+    assert.equal(codeList.codes.length, 2);
+    const targetRevoke = codeList.codes.find(c => c.prefix === batch.codes[0].prefix);
+    assert.equal((await asAdmin(`/api/admin/redeem-codes/${targetRevoke.codeHash}/revoke`, {})).status, 200);
+
+    asUser = mint(user);
+    assert.equal((await asUser('/api/plan/redeem', { code: batch.codes[1].code })).status, 200);
+    const codeListAfter = await (await asAdmin('/api/admin/redeem-codes')).json();
+    assert.equal(codeListAfter.redemptions.length, 1);
+    assert.equal(codeListAfter.redemptions[0].userEmail, 'usr-api@example.com');
+
+    // Cross-tenant fleet device inspection & emergency revoke
+    const fleet = await (await asAdmin('/api/admin/devices?status=online')).json();
+    assert.equal(fleet.devices.length, 1);
+    assert.equal(fleet.devices[0].ownerEmail, 'usr-api@example.com');
+    assert.equal((await asAdmin(`/api/admin/devices/${userDev.id}/revoke`, {})).status, 200);
+    assert.equal(store.devices(user.id)[0].revoked, true);
+
+    // Update live system policies & check reflection in /api/auth-config and Store
+    const settingsRes = await asAdmin('/api/admin/settings', { registrationMode: 'invite_only', freeMonthlyQuota: 15000, resultTtlMinutes: 10 });
+    assert.equal(settingsRes.status, 200);
+    assert.deepEqual(await settingsRes.json(), { registrationMode: 'invite_only', freeMonthlyQuota: 15000, resultTtlMinutes: 10 });
+    assert.equal((await (await fetch(origin + '/manage/api/auth-config')).json()).registrationMode, 'invite_only');
+    assert.equal(store.getResultTtlMinutes(30), 10);
+
+    // Global audit log records admin governance actions
+    const audit = await (await asAdmin('/api/admin/audit?q=admin_')).json();
+    for (const ev of ['admin_user_status_updated', 'admin_user_force_logout', 'admin_user_plan_updated', 'admin_device_revoked', 'admin_system_policies_updated']) {
+      assert.equal(audit.records.some(r => r.event === ev), true, `Missing audit event ${ev}`);
+    }
   } finally {
     await new Promise(resolve => server.close(resolve));
     store.db.close();
