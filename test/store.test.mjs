@@ -561,3 +561,112 @@ test('Store admin governance covers overview, users, sessions, plans, codes, fle
     assert.equal(globalAudit.some(r => r.event === 'admin_system_policies_updated'), true);
   } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
 });
+
+test('Store enforces strict CAS, lease renewal, pre-retirement terminal buffering, and per-user backpressure hooks', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'rcm-lp-store-'));
+  const wokenDevices = [];
+  const taskEvents = [];
+  const connected = new Set();
+  const baseNow = Date.now();
+  const store = new Store(join(folder, 'gateway.sqlite'), {
+    hooks: {
+      isDeviceConnected: (deviceId) => connected.has(deviceId),
+      onDeviceWake: (deviceId) => wokenDevices.push(deviceId),
+      onTaskEvent: (taskId) => taskEvents.push(taskId)
+    },
+    limits: {
+      maxUserActive: 2,
+      maxUserWaiting: 3,
+      taskLeaseMs: 5000,
+      maxTaskLifetimeMs: 25000
+    }
+  });
+  try {
+    const user = store.createGoogleUser({
+      sub: 'sub-lp-store',
+      email: 'lp@example.com',
+      displayName: 'LP User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    }).user;
+
+    const devA = store.pair(store.invite('Dev-A', ['read', 'write'], user.id, 'strict'), secret());
+    const devB = store.pair(store.invite('Dev-B', ['read', 'write'], user.id), secret());
+    const bootA1 = randomUUID();
+    const bootB1 = randomUUID();
+    store.sync(devA.id, bootA1, 'darwin', []);
+    store.sync(devB.id, bootB1, 'linux', []);
+
+    // Long-poll connection hook preserves online status beyond offlineMs when active
+    store.markOffline(devA.id, bootA1);
+    assert.equal(store.devices(user.id).find(d => d.id === devA.id).online, false);
+    connected.add(devA.id);
+    assert.equal(store.devices(user.id).find(d => d.id === devA.id).online, true);
+    store.sync(devA.id, bootA1, 'darwin', []);
+
+    // Clear hooks from setup
+    wokenDevices.length = 0;
+    taskEvents.length = 0;
+
+    // Submit wakes target device and per-user waiting queue cap (maxUserWaiting=3) is enforced across devices
+    const t1 = store.submit(devA.id, 'dc_call', { tool: 'write_file', arguments: { path: '1.txt', content: '1' } }, user.id);
+    assert.deepEqual(wokenDevices.slice(-1), [devA.id]);
+    const t2 = store.submit(devB.id, 'dc_call', { tool: 'read_file', arguments: { path: '2.txt' } }, user.id);
+    const t3 = store.submit(devB.id, 'dc_call', { tool: 'read_file', arguments: { path: '3.txt' } }, user.id);
+    assert.throws(
+      () => store.submit(devB.id, 'dc_call', { tool: 'read_file', arguments: { path: '4.txt' } }, user.id),
+      /account task queue is full/
+    );
+
+    // Per-user active cap (maxUserActive=2): devA takes t1, devB takes t2 (leaves t3 queued!)
+    assert.deepEqual(store.sync(devA.id, bootA1, 'darwin', []).jobs.map(j => j.id), [t1.id]);
+    assert.deepEqual(store.sync(devB.id, bootB1, 'linux', []).jobs.map(j => j.id), [t2.id]);
+    assert.equal(store.task(t3.id).status, 'queued');
+
+    // CAS & task events: awaiting_approval fires onTaskEvent immediately, backward running -> awaiting_approval ignored
+    taskEvents.length = 0;
+    store.sync(devA.id, bootA1, 'darwin', [{ id: t1.id, seq: 1, status: 'awaiting_approval', output: 'confirm?' }]);
+    assert.equal(store.task(t1.id).status, 'awaiting_approval');
+    assert.equal(taskEvents.includes(t1.id), true);
+
+    // Lease renewal increases deadline (capped at created + maxTaskLifetimeMs)
+    const beforeDeadline = Number(store.task(t1.id).deadline);
+    store.db.prepare('UPDATE tasks SET deadline=? WHERE id=?').run(Date.now() + 500, t1.id);
+    store.sync(devA.id, bootA1, 'darwin', [{ id: t1.id, seq: 2, status: 'running', output: 'step 1' }]);
+    assert.ok(Number(store.task(t1.id).deadline) >= beforeDeadline);
+    // Reject illegal backward transition running -> awaiting_approval even with higher seq
+    store.sync(devA.id, bootA1, 'darwin', [{ id: t1.id, seq: 3, status: 'awaiting_approval', output: 'bad' }]);
+    assert.equal(store.task(t1.id).status, 'running');
+    assert.equal(store.task(t1.id).seq, 2);
+
+    // Reject wrong boot without finishing t1
+    const wrongBoot = randomUUID();
+    store.sync(devA.id, bootA1, 'darwin', [{ id: t1.id, seq: 4, status: 'succeeded', output: 'spoof', boot: wrongBoot }]);
+    assert.equal(store.task(t1.id).status, 'running');
+
+    // Finishing t1 triggers onTaskEvent(t1) AND wakes devB because devB has queued task t3
+    wokenDevices.length = 0;
+    taskEvents.length = 0;
+    const ackReply = store.sync(devA.id, bootA1, 'darwin', [{ id: t1.id, seq: 4, status: 'succeeded', output: 'done-1' }]);
+    assert.deepEqual(ackReply.ack, [t1.id]);
+    assert.equal(store.task(t1.id).status, 'succeeded');
+    assert.equal(taskEvents.includes(t1.id), true);
+    assert.equal(wokenDevices.includes(devB.id), true);
+
+    // Freed user slot dispatches t3 alongside unacknowledged dispatched t2; then simulate devB crash & reboot with buffered terminal t2+t3
+    assert.deepEqual(new Set(store.sync(devB.id, bootB1, 'linux', []).jobs.map(j => j.id)), new Set([t2.id, t3.id]));
+    const bootB2 = randomUUID();
+    const rebootReply = store.sync(devB.id, bootB2, 'linux', [
+      { id: t2.id, boot: bootB1, seq: 2, status: 'succeeded', output: 'buffered-2' },
+      { id: t3.id, boot: bootB1, seq: 2, status: 'failed', output: 'buffered-3' }
+    ]);
+    assert.deepEqual(new Set(rebootReply.ack), new Set([t2.id, t3.id]));
+    assert.equal(store.task(t2.id).status, 'succeeded');
+    assert.equal(store.task(t2.id).output, 'buffered-2');
+    assert.equal(store.task(t3.id).status, 'failed');
+    assert.equal(store.task(t3.id).output, 'buffered-3');
+
+    // Old bootB1 is retired
+    assert.equal(store.sync(devB.id, bootB1, 'linux', []), undefined);
+  } finally { store.db.close(); rmSync(folder, { recursive: true, force: true }); }
+});

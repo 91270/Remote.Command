@@ -600,7 +600,8 @@ test('RCM_MONTHLY_SOFT_QUOTA surfaces soft alert in who_am_i without blocking de
     OWNER_KEY: secret(),
     GOOGLE_CLIENT_ID: 'fixture-google-client',
     GOOGLE_CLIENT_SECRET: 'fixture-google-secret',
-    RCM_MONTHLY_SOFT_QUOTA: '2'
+    RCM_MONTHLY_SOFT_QUOTA: '2',
+    RCM_SYNC_WAIT_MS: '1000'
   };
   let gateway, client;
   try {
@@ -846,6 +847,266 @@ test('Free plan quota enforces 80% notice, 100% device call pause while keeping 
   } finally {
     stopDeviceLoop = true;
     await deviceLoop;
+    await client?.close();
+    await stop(gateway);
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('HTTP Long Polling achieves low dispatch latency, >95% idle sync reduction, and pending-results recovery without write replay', { timeout: 45000 }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-longpoll-e2e-'));
+  const ws = join(temp, 'workspace'), stateDir = join(temp, 'private'), config = join(temp, 'agent.json');
+  const db = join(temp, 'gateway.sqlite');
+  const gwPort = await port();
+  const proxyPort = await port();
+  const gwOrigin = `http://127.0.0.1:${gwPort}`;
+  const proxyOrigin = `http://127.0.0.1:${proxyPort}`;
+  let syncRequests = 0;
+  let dropNextTerminalSync = false;
+  let droppedTerminal = false;
+  const { createServer: httpCreateServer } = await import('node:http');
+  const countingProxy = httpCreateServer((req, res) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      const rawBody = Buffer.concat(chunks);
+      if (req.method === 'POST' && req.url === '/device/sync') {
+        syncRequests++;
+        if (dropNextTerminalSync && !droppedTerminal) {
+          try {
+            const parsed = JSON.parse(rawBody.toString('utf8'));
+            if (Array.isArray(parsed.updates) && parsed.updates.some(u => u.status === 'succeeded' || u.status === 'failed')) {
+              droppedTerminal = true;
+              dropNextTerminalSync = false;
+              res.writeHead(502).end('simulated transient disconnect');
+              return;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+      const upstream = httpRequest(gwOrigin + req.url, { method: req.method, headers: req.headers }, r => {
+        res.writeHead(r.statusCode, r.headers);
+        r.pipe(res);
+      });
+      upstream.on('error', () => { if (!res.headersSent) res.writeHead(503).end(); else res.end(); });
+      upstream.end(rawBody);
+    });
+  });
+
+  let gateway, agent, client;
+  try {
+    await countingProxy.listen(proxyPort, '127.0.0.1');
+    await once(countingProxy, 'listening');
+    await mkdir(ws);
+    await mkdir(stateDir, { mode: 0o700 });
+    await writeFile(join(ws, 'lp.txt'), 'fast long poll data\n');
+    await writeFile(join(ws, 'append.txt'), '');
+    await writeFile(config, JSON.stringify({ gateway: proxyOrigin, workspace: ws, stateDir, allowInsecureLoopback: true }));
+
+    const seedStore = new Store(db);
+    const created = seedStore.createGoogleUser({
+      sub: 'e2e-lp-sub',
+      email: 'lp-e2e@example.com',
+      displayName: 'LP E2E',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(created.status, 'ok');
+    const accessToken = secret();
+    seedStore.putAuth(accessToken, 'access', 3600000, { userId: created.user.id, scope: 'remote:use' });
+    const devCred = secret();
+    const dev = seedStore.pair(seedStore.invite('LP-Box', ['read', 'write'], created.user.id, 'client'), devCred);
+    await writeFile(join(stateDir, 'identity.json'), JSON.stringify({ origin: proxyOrigin, id: dev.id, credential: devCred }), { mode: 0o600 });
+    seedStore.db.close();
+
+    const env = {
+      ...process.env,
+      STATE_DB: db,
+      PUBLIC_ORIGIN: proxyOrigin,
+      ALLOW_INSECURE_LOOPBACK: '1',
+      PORT: String(gwPort),
+      BIND_HOST: '127.0.0.1',
+      OWNER_KEY: secret(),
+      GOOGLE_CLIENT_ID: 'fixture-google-client',
+      GOOGLE_CLIENT_SECRET: 'fixture-google-secret',
+      RCM_SYNC_WAIT_MS: '15000',
+      RCM_LONG_POLL_MS: '25000'
+    };
+    const agentEnv = { ...env, RCM_AGENT_LONG_POLL_MS: '25000' };
+
+    gateway = start(['dist/gateway.js'], { env });
+    await until(async () => (await fetch(proxyOrigin + '/healthz')).ok);
+    agent = start(['dist/agent.js', 'run', config], { env: agentEnv });
+
+    client = new Client({ name: 'lp-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(proxyOrigin + '/mcp'), { requestInit: { headers: jwt(accessToken) } }));
+    await until(async () => {
+      const devs = JSON.parse((await client.callTool({ name: 'list_devices', arguments: {} })).content[0].text);
+      return devs.find(d => d.id === dev.id)?.online;
+    });
+
+    // Wait briefly for initial catalog sync to settle into an idle long-poll, then check idle traffic
+    await delay(250);
+    const baselineSyncs = syncRequests;
+    await delay(2200);
+    assert.ok(syncRequests - baselineSyncs <= 1, `Expected <=1 idle sync in 2.2s with 25s long polling, got ${syncRequests - baselineSyncs}`);
+
+    // Immediate event wakeup + synchronous return under RCM_SYNC_WAIT_MS=15000
+    const t0 = performance.now();
+    const readRes = await client.callTool({ name: 'read_file', arguments: { device_id: dev.id, path: join(ws, 'lp.txt') } });
+    const elapsedMs = performance.now() - t0;
+    assert.equal(readRes.isError, undefined);
+    assert.match(readRes.content[0].text, /fast long poll data/);
+    assert.ok(elapsedMs < 1500, `Expected fast long-poll roundtrip, took ${Math.round(elapsedMs)}ms`);
+
+    // Simulate transient 502 dropping the terminal /device/sync response on a write call, then kill Agent before ack
+    dropNextTerminalSync = true;
+    const writePromise = client.callTool({
+      name: 'write_file',
+      arguments: { device_id: dev.id, path: join(ws, 'append.txt'), content: 'ONCE_ONLY\n', mode: 'append' }
+    });
+    const pendingDir = join(stateDir, 'pending-results');
+    await until(async () => droppedTerminal && (await readdir(pendingDir)).some(f => f.endsWith('.json')));
+    // Kill crashed Agent abruptly (SIGKILL), remove lock, and start a fresh Agent (new boot)
+    agent.kill('SIGKILL');
+    await once(agent, 'exit');
+    await rm(join(stateDir, 'identity.lock'), { recursive: true, force: true });
+    await rm(join(stateDir + '.lock'), { recursive: true, force: true }).catch(() => {});
+
+    agent = start(['dist/agent.js', 'run', config], { env: agentEnv });
+    const writeOutcome = await writePromise;
+    assert.equal(writeOutcome.isError, undefined);
+    assert.match(writeOutcome.content[0].text, /Successfully|wrote|append/i);
+
+    // Verify buffered file cleaned up after ack and write operation executed strictly once
+    await until(async () => (await readdir(pendingDir)).filter(f => f.endsWith('.json')).length === 0);
+    const writtenText = await readFile(join(ws, 'append.txt'), 'utf8');
+    assert.equal(writtenText.match(/ONCE_ONLY/g)?.length, 1);
+  } finally {
+    await client?.close();
+    await stop(agent);
+    await stop(gateway);
+    countingProxy.closeAllConnections();
+    countingProxy.close();
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('Gateway enforces execution lease renewal and per-user backpressure with cross-device wakeup', { timeout: 25000 }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'rcm-lease-backpressure-'));
+  const db = join(temp, 'gateway.sqlite');
+  const p = await port();
+  const origin = `http://127.0.0.1:${p}`;
+  const env = {
+    ...process.env,
+    STATE_DB: db,
+    PUBLIC_ORIGIN: origin,
+    ALLOW_INSECURE_LOOPBACK: '1',
+    PORT: String(p),
+    BIND_HOST: '127.0.0.1',
+    OWNER_KEY: secret(),
+    GOOGLE_CLIENT_ID: 'fixture-google-client',
+    GOOGLE_CLIENT_SECRET: 'fixture-google-secret',
+    RCM_SYNC_WAIT_MS: '3000',
+    RCM_LONG_POLL_MS: '15000',
+    RCM_TASK_LEASE_MS: '1000',
+    RCM_MAX_USER_ACTIVE: '1',
+    RCM_MAX_USER_WAITING: '2'
+  };
+  let gateway, client;
+  const ac = new AbortController();
+  try {
+    const catalog = JSON.parse(await readFile('vendor/desktop-commander-full/catalog.json', 'utf8'));
+    const seedStore = new Store(db);
+    const userRes = seedStore.createGoogleUser({
+      sub: 'e2e-bp-sub',
+      email: 'bp@example.com',
+      displayName: 'BP User',
+      avatarUrl: null,
+      adminEmails: new Set()
+    });
+    assert.equal(userRes.status, 'ok');
+    const accessToken = secret();
+    seedStore.putAuth(accessToken, 'access', 3600000, { userId: userRes.user.id, scope: 'remote:use' });
+    const credA = secret(), credB = secret();
+    const devA = seedStore.pair(seedStore.invite('DevA', ['read'], userRes.user.id), credA);
+    const devB = seedStore.pair(seedStore.invite('DevB', ['read'], userRes.user.id), credB);
+    const bootA = randomUUID(), bootB = randomUUID();
+    seedStore.sync(devA.id, bootA, 'linux', [], catalog);
+    seedStore.sync(devB.id, bootB, 'linux', [], catalog);
+    seedStore.db.close();
+
+    gateway = start(['dist/gateway.js'], { env });
+    await until(async () => (await fetch(origin + '/healthz')).ok);
+
+    client = new Client({ name: 'bp-client', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(origin + '/mcp'), { requestInit: { headers: jwt(accessToken) } }));
+
+    // devA takes Task 1, holds it > 1s while renewing its lease
+    const res1Promise = client.callTool({ name: 'read_file', arguments: { device_id: devA.id, path: 'a.txt' } });
+    const pollA1 = await (await post(origin + '/device/sync', { boot: bootA, platform: 'linux', updates: [], ready: true, waitMs: 5000 }, jwt(credA))).json();
+    assert.equal(pollA1.jobs.length, 1);
+    const job1 = pollA1.jobs[0];
+
+    // Renew lease at 500ms so job1 stays alive past initial 1000ms lease
+    await delay(500);
+    await post(origin + '/device/sync', { boot: bootA, platform: 'linux', updates: [{ id: job1.id, seq: 2, status: 'running', output: 'renewed' }], ready: true }, jwt(credA));
+
+    // Put devB in a long poll, submit b1 (wakes devB immediately with 0 slots), then submit b2 (maxUserWaiting=2) and verify b3 hits limit
+    const pollBPromise = fetch(origin + '/device/sync', {
+      method: 'POST',
+      signal: ac.signal,
+      headers: { 'Content-Type': 'application/json', ...jwt(credB) },
+      body: JSON.stringify({ boot: bootB, platform: 'linux', updates: [], ready: true, waitMs: 5000 })
+    }).then(r => r.json());
+
+    const b1Promise = client.callTool({ name: 'read_file', arguments: { device_id: devB.id, path: 'b1.txt' } });
+    const wokenInitial = await pollBPromise;
+    assert.equal(wokenInitial.jobs.length, 0);
+
+    const b2Promise = client.callTool({ name: 'read_file', arguments: { device_id: devB.id, path: 'b2.txt' } });
+    await delay(80);
+    const b3Res = await client.callTool({ name: 'read_file', arguments: { device_id: devB.id, path: 'b3.txt' } });
+    assert.equal(b3Res.isError, true);
+    assert.match(b3Res.content[0].text, /account task queue is full/);
+
+    const pollBWaiting = fetch(origin + '/device/sync', {
+      method: 'POST',
+      signal: ac.signal,
+      headers: { 'Content-Type': 'application/json', ...jwt(credB) },
+      body: JSON.stringify({ boot: bootB, platform: 'linux', updates: [], ready: true, waitMs: 5000 })
+    }).then(r => r.json());
+
+    // Wait past initial 1000ms lease before completing job1 on devA -> frees userActive slot and wakes devB's long poll!
+    await delay(550);
+    const wakeAt = performance.now();
+    await post(origin + '/device/sync', {
+      boot: bootA,
+      platform: 'linux',
+      updates: [{ id: job1.id, seq: 3, status: 'succeeded', output: 'a-ok', result: { content: [{ type: 'text', text: 'a-ok' }] } }],
+      ready: true
+    }, jwt(credA));
+
+    const res1 = await res1Promise;
+    assert.equal(res1.isError, undefined);
+    assert.equal(res1.content[0].text, 'a-ok');
+
+    const pollBDispatched = await pollBWaiting;
+    assert.ok(performance.now() - wakeAt < 1000, 'Sibling device devB should wake up immediately when devA finishes');
+    assert.equal(pollBDispatched.jobs.length, 1);
+
+    // Finish b1 on devB and cancel/complete b2 so b1Promise resolves cleanly
+    await post(origin + '/device/sync', {
+      boot: bootB,
+      platform: 'linux',
+      updates: [{ id: pollBDispatched.jobs[0].id, seq: 1, status: 'succeeded', output: 'b-ok', result: { content: [{ type: 'text', text: 'b-ok' }] } }],
+      ready: true
+    }, jwt(credB));
+    const b1Res = await b1Promise;
+    assert.equal(b1Res.content[0].text, 'b-ok');
+    await b2Promise;
+  } finally {
+    ac.abort();
     await client?.close();
     await stop(gateway);
     await rm(temp, { recursive: true, force: true });

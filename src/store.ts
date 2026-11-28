@@ -2,10 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { hash, secret, offlineMs, maxActive, maxWaiting, terminal, capability, capabilities, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
+import { hash, secret, offlineMs, maxActive, maxWaiting, maxUserActive, maxUserWaiting, defaultTaskLeaseMs, maxTaskLifetimeMs, terminal, capability, capabilities, names, approvalModes, type ApprovalMode, type Op, type Update, type Capability, type Catalog } from './protocol.js';
 
 const day = 86400000;
-const dispatchMs = 16 * 60_000;
 const SCHEMA_VERSION = 4;
 export const DEFAULT_FREE_MONTHLY_QUOTA = 10000;
 export const redeemTiers = ['monthly', 'quarterly', 'yearly', 'lifetime'] as const;
@@ -159,6 +158,21 @@ export function evaluateMonthlySoftQuota(
   };
 }
 export type RegistrationMode = 'invite_only' | 'open' | 'closed';
+export type StoreHooks = {
+  isDeviceConnected?: (deviceId: string, boot?: string | null) => boolean;
+  onDeviceWake?: (deviceId: string) => void;
+  onTaskEvent?: (taskId: string) => void;
+};
+export type StoreLimits = {
+  maxUserActive?: number;
+  maxUserWaiting?: number;
+  taskLeaseMs?: number;
+  maxTaskLifetimeMs?: number;
+};
+export type StoreOptions = {
+  hooks?: StoreHooks;
+  limits?: StoreLimits;
+};
 export type UserRecord = {
   id: string;
   username: string | null;
@@ -213,12 +227,22 @@ export class Store {
   readonly db: DatabaseSync;
   private readonly liveSeen = new Map<string, { seen: number; boot: string; platform: string; dirty: boolean }>();
   private readonly liveOAuthActivity = new Map<string, { at: number; flushedAt: number; digest?: string }>();
+  private readonly hooks: StoreHooks;
+  private readonly maxUserActive: number;
+  private readonly maxUserWaiting: number;
+  private readonly taskLeaseMs: number;
+  private readonly maxTaskLifetimeMs: number;
 
   private oauthActivityKey(userId: string, clientId: string): string {
     return `${userId}\0${clientId}`;
   }
 
-  constructor(file: string) {
+  constructor(file: string, options?: StoreOptions) {
+    this.hooks = options?.hooks ?? {};
+    this.maxUserActive = Math.max(1, options?.limits?.maxUserActive ?? maxUserActive);
+    this.maxUserWaiting = Math.max(1, options?.limits?.maxUserWaiting ?? maxUserWaiting);
+    this.taskLeaseMs = Math.max(1000, options?.limits?.taskLeaseMs ?? defaultTaskLeaseMs);
+    this.maxTaskLifetimeMs = Math.max(this.taskLeaseMs, options?.limits?.maxTaskLifetimeMs ?? maxTaskLifetimeMs);
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(file);
     this.db.exec(`PRAGMA trusted_schema = OFF; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;
@@ -310,6 +334,7 @@ export class Store {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS devices_user ON devices(user_id, revoked);
         CREATE INDEX IF NOT EXISTS tasks_user ON tasks(user_id, created DESC);
+        CREATE INDEX IF NOT EXISTS tasks_user_status ON tasks(user_id, status);
         CREATE INDEX IF NOT EXISTS tasks_payload_purge ON tasks(payload_purged, status, changed);
         CREATE INDEX IF NOT EXISTS audit_user ON audit(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS usage_events_user_created ON usage_events(user_id, created_at DESC);
@@ -380,6 +405,30 @@ export class Store {
   private deviceLastSeen(id: string, dbLastSeen: number | null): number {
     const mem = this.liveSeen.get(id);
     return Math.max(Number(dbLastSeen ?? 0), mem?.seen ?? 0);
+  }
+
+  private isDeviceOnline(id: string, revoked: number, seen: number, boot: string | null, now = Date.now()): boolean {
+    if (revoked) return false;
+    if (seen > 0 && now - seen < offlineMs) return true;
+    return Boolean(this.hooks.isDeviceConnected?.(id, boot));
+  }
+
+  private emitTaskEvents(taskIds: Iterable<string>) {
+    for (const id of taskIds) this.hooks.onTaskEvent?.(id);
+  }
+
+  private wakeQueuedDevicesForUsers(userIds: Iterable<string>, excludeDevice?: string, now = Date.now()) {
+    if (!this.hooks.onDeviceWake) return;
+    const seenUsers = new Set<string>();
+    for (const userId of userIds) {
+      if (!userId || seenUsers.has(userId)) continue;
+      seenUsers.add(userId);
+      const rows = this.db.prepare("SELECT DISTINCT device FROM tasks WHERE user_id=? AND status='queued' AND deadline>?").all(userId, now) as { device: string }[];
+      for (const row of rows) {
+        const deviceId = String(row.device);
+        if (deviceId !== excludeDevice) this.hooks.onDeviceWake(deviceId);
+      }
+    }
   }
 
   tx<T>(fn: () => T): T {
@@ -1193,13 +1242,14 @@ export class Store {
 
   devices(userId?: string) {
     const rows = userId
-      ? this.db.prepare('SELECT id,user_id,name,caps,approval_mode,seen,last_seen,platform,revoked FROM devices WHERE user_id=? ORDER BY name,id').all(userId)
-      : this.db.prepare('SELECT id,user_id,name,caps,approval_mode,seen,last_seen,platform,revoked FROM devices ORDER BY name,id').all();
+      ? this.db.prepare('SELECT id,user_id,name,caps,approval_mode,boot,seen,last_seen,platform,revoked FROM devices WHERE user_id=? ORDER BY name,id').all(userId)
+      : this.db.prepare('SELECT id,user_id,name,caps,approval_mode,boot,seen,last_seen,platform,revoked FROM devices ORDER BY name,id').all();
     const now = Date.now();
     return rows.map(row => {
       const id = String(row.id);
       const seen = this.deviceSeen(id, row.seen ? Number(row.seen) : null);
       const lastSeen = this.deviceLastSeen(id, row.last_seen ? Number(row.last_seen) : null);
+      const boot = row.boot ? String(row.boot) : null;
       return {
         id,
         userId: row.user_id ? String(row.user_id) : null,
@@ -1207,7 +1257,7 @@ export class Store {
         capabilities: JSON.parse(String(row.caps)),
         approvalMode: normalizeApprovalMode(row.approval_mode),
         platform: row.platform ? String(row.platform) : null,
-        online: !row.revoked && seen > 0 && now - seen < offlineMs,
+        online: this.isDeviceOnline(id, Number(row.revoked), seen, boot, now),
         lastSeen: lastSeen > 0 ? new Date(lastSeen).toISOString() : null,
         revoked: !!row.revoked
       };
@@ -1215,18 +1265,21 @@ export class Store {
   }
 
   renameDevice(id: string, name: string, userId?: string): boolean {
-    return this.tx(() => {
+    const updated = this.tx(() => {
       const res = userId
         ? this.db.prepare('UPDATE devices SET name=? WHERE id=? AND user_id=? AND revoked=0').run(name, id, userId)
         : this.db.prepare('UPDATE devices SET name=? WHERE id=? AND revoked=0').run(name, id);
       if (!res.changes) return false;
+      this.liveSeen.delete(id);
       this.audit('device_renamed', { device: id, name }, userId);
       return true;
     });
+    if (updated) this.hooks.onDeviceWake?.(id);
+    return updated;
   }
 
   setDeviceApprovalMode(id: string, approvalMode: ApprovalMode, userId?: string): boolean {
-    return this.tx(() => {
+    const updated = this.tx(() => {
       const res = userId
         ? this.db.prepare('UPDATE devices SET approval_mode=? WHERE id=? AND user_id=? AND revoked=0').run(approvalMode, id, userId)
         : this.db.prepare('UPDATE devices SET approval_mode=? WHERE id=? AND revoked=0').run(approvalMode, id);
@@ -1234,10 +1287,12 @@ export class Store {
       this.audit('device_approval_mode_updated', { device: id, approvalMode }, userId);
       return true;
     });
+    if (updated) this.hooks.onDeviceWake?.(id);
+    return updated;
   }
 
   setDevicePolicy(id: string, caps: Capability[], approvalMode: ApprovalMode, userId?: string): boolean {
-    return this.tx(() => {
+    const updated = this.tx(() => {
       const encodedCaps = JSON.stringify(caps);
       const res = userId
         ? this.db.prepare('UPDATE devices SET caps=?, approval_mode=? WHERE id=? AND user_id=? AND revoked=0').run(encodedCaps, approvalMode, id, userId)
@@ -1246,37 +1301,54 @@ export class Store {
       this.audit('device_policy_updated', { device: id, capabilities: caps, approvalMode }, userId);
       return true;
     });
+    if (updated) this.hooks.onDeviceWake?.(id);
+    return updated;
   }
 
   revoke(id: string, userId?: string) {
-    return this.tx(() => {
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
+    const revoked = this.tx(() => {
       const row = userId
         ? this.db.prepare('SELECT user_id FROM devices WHERE id=? AND user_id=? AND revoked=0').get(id, userId) as { user_id: string | null } | undefined
         : this.db.prepare('SELECT user_id FROM devices WHERE id=? AND revoked=0').get(id) as { user_id: string | null } | undefined;
       if (!row) return false;
       this.db.prepare('UPDATE devices SET revoked=1, seen=0 WHERE id=?').run(id);
       this.liveSeen.delete(id);
-      this.interruptRevokedDeviceTasks(id);
+      this.interruptRevokedDeviceTasks(id, taskEvents, freedUsers);
       this.audit('device_revoked', { device: id }, row.user_id ?? userId);
       return true;
     });
+    if (revoked) {
+      this.hooks.onDeviceWake?.(id);
+      this.emitTaskEvents(taskEvents);
+      this.wakeQueuedDevicesForUsers(freedUsers, id);
+    }
+    return revoked;
   }
 
-  private interruptRevokedDeviceTasks(device: string) {
-    for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${outstandingSql}`).all(device)) {
-      this.finish(String(t.id), 'interrupted', 'Device revoked. Work already started on the device may require local cleanup.');
+  private interruptRevokedDeviceTasks(device: string, taskEvents?: string[], freedUsers?: Set<string>) {
+    for (const t of this.db.prepare(`SELECT id,user_id FROM tasks WHERE device=? AND status IN ${outstandingSql}`).all(device) as { id: string; user_id: string | null }[]) {
+      const taskId = String(t.id);
+      this.finish(taskId, 'interrupted', 'Device revoked. Work already started on the device may require local cleanup.');
+      taskEvents?.push(taskId);
+      if (t.user_id) freedUsers?.add(String(t.user_id));
     }
   }
 
   revokeAllDevices(userId?: string) {
-    return this.tx(() => {
+    const revokedDeviceIds: string[] = [];
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
+    const result = this.tx(() => {
       const revoked = userId
         ? this.db.prepare('UPDATE devices SET revoked=1, seen=0 WHERE revoked=0 AND user_id=? RETURNING id').all(userId)
         : this.db.prepare('UPDATE devices SET revoked=1, seen=0 WHERE revoked=0 RETURNING id').all();
       for (const row of revoked) {
         const id = String(row.id);
+        revokedDeviceIds.push(id);
         this.liveSeen.delete(id);
-        this.interruptRevokedDeviceTasks(id);
+        this.interruptRevokedDeviceTasks(id, taskEvents, freedUsers);
       }
       const invites = userId
         ? this.db.prepare('DELETE FROM invites WHERE user_id=?').run(userId).changes
@@ -1284,10 +1356,14 @@ export class Store {
       const pairings = userId
         ? this.db.prepare("DELETE FROM auth WHERE kind='device-enrollment' AND (json_extract(data,'$.userId')=? OR json_extract(data,'$.userId') IS NULL)").run(userId).changes
         : this.db.prepare("DELETE FROM auth WHERE kind='device-enrollment'").run().changes;
-      const result = { revokedDevices: revoked.length, invalidatedPairings: Number(invites) + Number(pairings) };
-      if (result.revokedDevices || result.invalidatedPairings) this.audit('devices_revoked_all', result, userId);
-      return result;
+      const summary = { revokedDevices: revoked.length, invalidatedPairings: Number(invites) + Number(pairings) };
+      if (summary.revokedDevices || summary.invalidatedPairings) this.audit('devices_revoked_all', summary, userId);
+      return summary;
     });
+    for (const id of revokedDeviceIds) this.hooks.onDeviceWake?.(id);
+    this.emitTaskEvents(taskEvents);
+    this.wakeQueuedDevicesForUsers(freedUsers);
+    return result;
   }
 
   private purgeDeviceRecord(id: string) {
@@ -1325,20 +1401,31 @@ export class Store {
 
   markOffline(id: string, boot: string | null) {
     if (!boot) return;
-    this.tx(() => {
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
+    const didMarkOffline = this.tx(() => {
       const dev = this.db.prepare('SELECT user_id, boot FROM devices WHERE id=? AND boot=? AND revoked=0').get(id, boot) as { user_id: string | null; boot: string } | undefined;
-      if (!dev) return;
+      if (!dev) return false;
       const mem = this.liveSeen.get(id);
       const flushedLastSeen = mem?.seen ?? 0;
       this.db.prepare('UPDATE devices SET seen=0, last_seen=MAX(COALESCE(last_seen,0),?) WHERE id=? AND boot=? AND revoked=0')
         .run(flushedLastSeen, id, boot);
       this.liveSeen.delete(id);
-      const outstanding = this.db.prepare(`SELECT id FROM tasks WHERE device=? AND boot=? AND status IN ${liveSql}`).all(id, boot);
+      const outstanding = this.db.prepare(`SELECT id,user_id FROM tasks WHERE device=? AND boot=? AND status IN ${liveSql}`).all(id, boot) as { id: string; user_id: string | null }[];
       for (const task of outstanding) {
-        this.finish(String(task.id), 'interrupted', 'Agent disconnected before reporting the result.');
+        const taskId = String(task.id);
+        this.finish(taskId, 'interrupted', 'Agent disconnected before reporting the result.');
+        taskEvents.push(taskId);
+        if (task.user_id) freedUsers.add(String(task.user_id));
       }
       this.audit('device_offline', { device: id }, dev.user_id);
+      return true;
     });
+    if (didMarkOffline) {
+      this.hooks.onDeviceWake?.(id);
+      this.emitTaskEvents(taskEvents);
+      this.wakeQueuedDevicesForUsers(freedUsers, id);
+    }
   }
 
   deviceByToken(token: string): DeviceRow | undefined {
@@ -1390,20 +1477,23 @@ export class Store {
   }
 
   submit(device: string, op: Op, args: object, userId?: string) {
-    return this.tx(() => {
+    const view = this.tx(() => {
       const dev = userId
         ? this.db.prepare('SELECT * FROM devices WHERE id=? AND user_id=? AND revoked=0').get(device, userId) as DeviceRow | undefined
         : this.db.prepare('SELECT * FROM devices WHERE id=? AND revoked=0').get(device) as DeviceRow | undefined;
       if (!dev) throw new Error('Unknown or revoked device.');
       if (!JSON.parse(dev.caps).includes(capability(op, args as Record<string, unknown>))) throw new Error('Device is not paired for this operation.');
+      const now = Date.now();
       const seen = this.deviceSeen(device, dev.seen);
-      if (!seen || Date.now() - seen >= offlineMs) throw new Error('Device is offline.');
+      if (!this.isDeviceOnline(device, dev.revoked, seen, dev.boot, now)) throw new Error('Device is offline.');
       if (Number((this.db.prepare("SELECT count(*) AS n FROM tasks WHERE device=? AND status='queued'").get(device) as { n: number }).n) >= maxWaiting)
         throw new Error('The device queue is full; wait for outstanding jobs.');
-      const id = randomUUID(), now = Date.now(), body = JSON.stringify(args);
+      const owner = dev.user_id ?? userId ?? this.resolveOwner();
+      if (owner && Number((this.db.prepare("SELECT count(*) AS n FROM tasks WHERE user_id=? AND status='queued'").get(owner) as { n: number }).n) >= this.maxUserWaiting)
+        throw new Error('Your account task queue is full; wait for outstanding jobs across your devices.');
+      const id = randomUUID(), body = JSON.stringify(args);
       const tool = (args as { tool?: unknown }).tool;
       const nativeName = op === 'dc_call' && typeof tool === 'string' ? tool : op === 'disconnect' ? 'shutdown' : null;
-      const owner = dev.user_id ?? userId ?? this.resolveOwner();
       this.db.prepare("INSERT INTO tasks(id,user_id,device,op,args,status,created,changed,deadline,tool_name) VALUES(?,?,?,?,?,'queued',?,?,?,?)")
         .run(id, owner, device, op, body, now, now, now + 900000, nativeName);
       this.db.prepare("INSERT INTO usage_events(task_id,user_id,device_id,tool_name,op,status,created_at) VALUES(?,?,?,?,?,'queued',?)")
@@ -1411,6 +1501,8 @@ export class Store {
       this.audit('task_submitted', { id, device, op, argsDigest: hash(body) }, owner);
       return this.view(this.task(id)!);
     });
+    this.hooks.onDeviceWake?.(device);
+    return view;
   }
 
   markBackground(id: string) {
@@ -1454,16 +1546,27 @@ export class Store {
   }
 
   cancel(id: string, userId?: string) {
-    return this.tx(() => {
+    const outcome = this.tx(() => {
       const task = this.task(id, userId);
       if (!task) throw new Error('Unknown task.');
-      if (task.status === 'queued') this.finish(id, 'cancelled', 'Cancelled before dispatch.');
-      else if (!task.cancel && !terminal.some(s => s === task.status)) {
+      let becameTerminal = false;
+      let wakeDevice = false;
+      if (task.status === 'queued') {
+        this.finish(id, 'cancelled', 'Cancelled before dispatch.');
+        becameTerminal = true;
+      } else if (!task.cancel && !terminal.some(s => s === task.status)) {
         this.db.prepare('UPDATE tasks SET cancel=1,changed=? WHERE id=?').run(Date.now(), id);
         this.audit('task_cancel_requested', { id }, task.user_id);
+        wakeDevice = true;
       }
-      return this.view(this.task(id)!);
+      return { view: this.view(this.task(id)!), device: task.device, userId: task.user_id, becameTerminal, wakeDevice };
     });
+    if (outcome.wakeDevice) this.hooks.onDeviceWake?.(outcome.device);
+    if (outcome.becameTerminal) {
+      this.hooks.onTaskEvent?.(id);
+      if (outcome.userId) this.wakeQueuedDevicesForUsers([outcome.userId]);
+    }
+    return outcome.view;
   }
 
   flushLiveSeen() {
@@ -1510,14 +1613,19 @@ export class Store {
   }
 
   maintain(taskDays = 7, auditDays = 90, dcrClientDays = 30, usageDays = 210, resultTtlMinutes = 30) {
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
     this.tx(() => {
       this.flushLiveSeen();
       const now = Date.now();
       this.flushLiveOAuthActivity(now);
       this._downgradeExpiredProUsers(now);
-      for (const t of this.db.prepare(`SELECT id,status FROM tasks WHERE status NOT IN ${doneSql} AND deadline<?`).all(now)) {
-        this.finish(String(t.id), t.status === 'queued' ? 'timed_out' : 'interrupted',
+      for (const t of this.db.prepare(`SELECT id,user_id,status FROM tasks WHERE status NOT IN ${doneSql} AND deadline<?`).all(now) as { id: string; user_id: string | null; status: string }[]) {
+        const taskId = String(t.id);
+        this.finish(taskId, t.status === 'queued' ? 'timed_out' : 'interrupted',
           t.status === 'queued' ? 'Expired before dispatch.' : 'Agent result was not received. Check the device before retrying.');
+        taskEvents.push(taskId);
+        if (t.user_id) freedUsers.add(String(t.user_id));
       }
       this.purgeExpiredPayloads(resultTtlMinutes, now);
       this.db.prepare(`DELETE FROM tasks WHERE status IN ${doneSql} AND changed<?`).run(now - taskDays * day);
@@ -1527,6 +1635,69 @@ export class Store {
       this.db.prepare('DELETE FROM auth WHERE expires<?').run(now);
       this.db.prepare('DELETE FROM oauth_clients WHERE COALESCE(last_used_at, created_at)<?').run(now - dcrClientDays * day);
     });
+    this.emitTaskEvents(taskEvents);
+    this.wakeQueuedDevicesForUsers(freedUsers);
+  }
+
+  private applyTaskUpdate(
+    u: Update,
+    expectedDevice: string,
+    expectedBoot: string,
+    now: number,
+    ack: string[],
+    taskEvents: string[],
+    freedUsers: Set<string>
+  ) {
+    const t = this.task(u.id);
+    if (!t || t.device !== expectedDevice || t.boot !== expectedBoot) {
+      ack.push(u.id);
+      return;
+    }
+    if (terminal.some(s => s === t.status)) {
+      ack.push(u.id);
+      return;
+    }
+    if (u.seq <= t.seq || (t.status === 'running' && u.status === 'awaiting_approval')) return;
+
+    if (terminal.some(s => s === u.status)) {
+      const durationMs = Math.max(0, now - Number(t.created));
+      const res = this.db.prepare(
+        `UPDATE tasks SET status=?,seq=?,changed=?,duration_ms=?,output=?,mcp_result=?,args='{}'
+         WHERE id=? AND device=? AND boot=? AND seq<? AND status NOT IN ${doneSql}`
+      ).run(u.status, u.seq, now, durationMs, u.output ?? '', u.result ? JSON.stringify(u.result) : null, u.id, expectedDevice, expectedBoot, u.seq);
+      if (res.changes) {
+        this.db.prepare('UPDATE usage_events SET status=?,finished_at=?,duration_ms=? WHERE task_id=?').run(u.status, now, durationMs, u.id);
+        if (
+          t.user_id &&
+          (t.op === 'dc_call' || t.op === 'dc_resource') &&
+          (u.status === 'succeeded' || u.status === 'failed')
+        ) {
+          this.db.prepare(
+            'INSERT INTO usage_monthly(user_id,month,billable_calls,updated_at) VALUES(?,?,1,?) ON CONFLICT(user_id,month) DO UPDATE SET billable_calls=billable_calls+1, updated_at=excluded.updated_at'
+          ).run(t.user_id, utcMonthKey(now), now);
+        }
+        this.audit('task_' + u.status, { id: u.id }, t.user_id);
+        taskEvents.push(u.id);
+        if (t.user_id) freedUsers.add(String(t.user_id));
+      }
+      ack.push(u.id);
+      return;
+    }
+
+    const allowedCurrent = u.status === 'awaiting_approval'
+      ? "('dispatched','awaiting_approval')"
+      : "('dispatched','awaiting_approval','running')";
+    const newDeadline = Math.min(Number(t.created) + this.maxTaskLifetimeMs, Math.max(Number(t.deadline), now + this.taskLeaseMs));
+    const nextOutput = u.status === t.status && u.output === undefined ? t.output : (u.output ?? null);
+    const res = this.db.prepare(
+      `UPDATE tasks SET status=?,seq=?,changed=?,deadline=?,output=?
+       WHERE id=? AND device=? AND boot=? AND seq<? AND status IN ${allowedCurrent}`
+    ).run(u.status, u.seq, now, newDeadline, nextOutput, u.id, expectedDevice, expectedBoot, u.seq);
+    if (res.changes && t.status !== u.status) {
+      this.audit('task_' + u.status, { id: u.id }, t.user_id);
+      this.db.prepare('UPDATE usage_events SET status=? WHERE task_id=?').run(u.status, u.id);
+      if (u.status === 'awaiting_approval') taskEvents.push(u.id);
+    }
   }
 
   sync(device: string, boot: string, platform: string, updates: Update[], catalog?: Catalog, ready = true) {
@@ -1554,15 +1725,35 @@ export class Store {
       }
     }
 
-    return this.tx(() => {
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
+    const reply = this.tx(() => {
       const dev = this.db.prepare('SELECT * FROM devices WHERE id=? AND revoked=0').get(device) as DeviceRow | undefined;
       if (!dev || this.db.prepare('SELECT 1 FROM retired_boots WHERE device=? AND boot=?').get(device, boot)) return;
-      for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${outstandingSql} AND op NOT IN (${operationPlaceholders})`).all(device, ...names))
-        this.finish(String(t.id), 'interrupted', 'This operation is unavailable on the current Agent.');
+      for (const t of this.db.prepare(`SELECT id,user_id FROM tasks WHERE device=? AND status IN ${outstandingSql} AND op NOT IN (${operationPlaceholders})`).all(device, ...names) as { id: string; user_id: string | null }[]) {
+        const taskId = String(t.id);
+        this.finish(taskId, 'interrupted', 'This operation is unavailable on the current Agent.');
+        taskEvents.push(taskId);
+        if (t.user_id) freedUsers.add(String(t.user_id));
+      }
+
+      const ack: string[] = [];
       if (dev.boot && dev.boot !== boot) {
-        this.db.prepare('INSERT INTO retired_boots VALUES(?,?)').run(device, dev.boot);
-        for (const t of this.db.prepare(`SELECT id FROM tasks WHERE device=? AND status IN ${liveSql}`).all(device))
-          this.finish(String(t.id), 'interrupted', 'Agent restarted before reporting the result. Work is not replayed.');
+        // Flush buffered terminal results from the immediately preceding boot before retiring it.
+        if (!this.db.prepare('SELECT 1 FROM retired_boots WHERE device=? AND boot=?').get(device, dev.boot)) {
+          for (const u of updates) {
+            if (u.boot === dev.boot && terminal.some(s => s === u.status)) {
+              this.applyTaskUpdate(u, device, dev.boot, now, ack, taskEvents, freedUsers);
+            }
+          }
+        }
+        this.db.prepare('INSERT OR IGNORE INTO retired_boots VALUES(?,?)').run(device, dev.boot);
+        for (const t of this.db.prepare(`SELECT id,user_id FROM tasks WHERE device=? AND status IN ${liveSql}`).all(device) as { id: string; user_id: string | null }[]) {
+          const taskId = String(t.id);
+          this.finish(taskId, 'interrupted', 'Agent restarted before reporting the result. Work is not replayed.');
+          taskEvents.push(taskId);
+          if (t.user_id) freedUsers.add(String(t.user_id));
+        }
       }
       if (catalog) this.db.prepare('INSERT INTO device_catalog VALUES(?,?) ON CONFLICT(device) DO UPDATE SET catalog=excluded.catalog').run(device, JSON.stringify(catalog));
       this.db.prepare('UPDATE devices SET boot=?,seen=?,last_seen=MAX(COALESCE(last_seen,0),?),platform=? WHERE id=?')
@@ -1570,20 +1761,12 @@ export class Store {
       if (ready) this.liveSeen.set(device, { seen: now, boot, platform, dirty: false });
       else this.liveSeen.delete(device);
 
-      const ack: string[] = [];
       for (const u of updates) {
-        const t = this.task(u.id);
-        if (!t || device !== t.device || boot !== t.boot) { ack.push(u.id); continue; }
-        if (terminal.some(s => s === t.status)) { ack.push(u.id); continue; }
-        if (u.seq <= t.seq || (t.status === 'running' && u.status === 'awaiting_approval')) continue;
-        if (terminal.some(s => s === u.status)) {
-          this.finish(u.id, u.status, u.output ?? '', u.result);
-          ack.push(u.id);
-        } else {
-          if (t.status !== u.status) this.audit('task_' + u.status, { id: u.id }, t.user_id);
-          this.db.prepare('UPDATE tasks SET status=?,seq=?,changed=?,output=? WHERE id=?').run(u.status, u.seq, now, u.output ?? null, u.id);
-          this.db.prepare('UPDATE usage_events SET status=? WHERE task_id=?').run(u.status, u.id);
+        if (u.boot && u.boot !== boot) {
+          if (!ack.includes(u.id)) ack.push(u.id);
+          continue;
         }
+        this.applyTaskUpdate(u, device, boot, now, ack, taskEvents, freedUsers);
       }
       const approvalMode = normalizeApprovalMode(dev.approval_mode);
       const ownerRow = dev.user_id
@@ -1597,16 +1780,29 @@ export class Store {
       };
       const active = this.db.prepare(`SELECT * FROM tasks WHERE device=? AND status IN ${liveSql} ORDER BY created`).all(device) as TaskRow[];
       if (!ready) return { jobs: [], cancel: active.filter(task => task.cancel).map(task => task.id), ack, approvalMode, ...deviceMeta };
-      const pending = this.db.prepare("SELECT * FROM tasks WHERE device=? AND status='queued' AND deadline>? ORDER BY created LIMIT ?")
-        .all(device, now, Math.max(0, maxActive - active.length)) as TaskRow[];
+      const deviceSlots = Math.max(0, maxActive - active.length);
+      let dispatchLimit = deviceSlots;
+      if (dev.user_id && dispatchLimit > 0) {
+        const userLiveRow = this.db.prepare(`SELECT count(*) AS n FROM tasks WHERE user_id=? AND status IN ${liveSql}`).get(dev.user_id) as { n: number };
+        dispatchLimit = Math.min(deviceSlots, Math.max(0, this.maxUserActive - Number(userLiveRow.n)));
+      }
+      const pending = dispatchLimit > 0
+        ? (this.db.prepare("SELECT * FROM tasks WHERE device=? AND status='queued' AND deadline>? ORDER BY created LIMIT ?").all(device, now, dispatchLimit) as TaskRow[])
+        : [];
       for (const t of pending) {
-        this.db.prepare("UPDATE tasks SET status='dispatched',boot=?,changed=?,deadline=? WHERE id=?").run(boot, now, now + dispatchMs, t.id);
+        const leaseDeadline = Math.min(Number(t.created) + this.maxTaskLifetimeMs, now + this.taskLeaseMs);
+        this.db.prepare("UPDATE tasks SET status='dispatched',boot=?,changed=?,deadline=? WHERE id=?").run(boot, now, leaseDeadline, t.id);
         this.db.prepare("UPDATE usage_events SET status='dispatched' WHERE task_id=?").run(t.id);
         this.audit('task_dispatched', { id: t.id, device }, t.user_id);
       }
       const jobs = [...active.filter(t => t.status === 'dispatched'), ...pending].map(t => ({ id: t.id, op: t.op, args: JSON.parse(t.args) }));
       return { jobs, cancel: active.filter(t => t.cancel).map(t => t.id), ack, approvalMode, ...deviceMeta };
     });
+    if (reply) {
+      this.emitTaskEvents(taskEvents);
+      this.wakeQueuedDevicesForUsers(freedUsers, device, now);
+    }
+    return reply;
   }
 
   // --- OAuth Clients ---
@@ -2149,13 +2345,15 @@ export class Store {
   }
 
   adminRevokeDevice(deviceId: string, actorUserId: string): boolean {
-    return this.tx(() => {
+    const taskEvents: string[] = [];
+    const freedUsers = new Set<string>();
+    const revoked = this.tx(() => {
       const row = this.db.prepare('SELECT id, user_id, name FROM devices WHERE id=? AND revoked=0')
         .get(deviceId) as { id: string; user_id: string | null; name: string } | undefined;
       if (!row) return false;
       this.db.prepare('UPDATE devices SET revoked=1, seen=0 WHERE id=?').run(deviceId);
       this.liveSeen.delete(deviceId);
-      this.interruptRevokedDeviceTasks(deviceId);
+      this.interruptRevokedDeviceTasks(deviceId, taskEvents, freedUsers);
       this.audit('admin_device_revoked', {
         device: deviceId,
         name: row.name,
@@ -2163,6 +2361,12 @@ export class Store {
       }, actorUserId);
       return true;
     });
+    if (revoked) {
+      this.hooks.onDeviceWake?.(deviceId);
+      this.emitTaskEvents(taskEvents);
+      this.wakeQueuedDevicesForUsers(freedUsers, deviceId);
+    }
+    return revoked;
   }
 
   adminRecentAudit(options?: { limit?: number; event?: string; search?: string }) {

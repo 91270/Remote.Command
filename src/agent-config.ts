@@ -82,6 +82,11 @@ export async function resolveAgentConfig(contents: unknown, configFile: string, 
   const approvalStat = await lstat(approvals);
   if (!approvalStat.isDirectory() || approvalStat.isSymbolicLink() || (process.platform !== 'win32' && (approvalStat.mode & 0o077) !== 0))
     throw new Error('Approval directory must be private and cannot be a link.');
+  const pendingResults = join(stateDir, 'pending-results');
+  await mkdir(pendingResults, { recursive: true, mode: 0o700 });
+  const pendingStat = await lstat(pendingResults);
+  if (!pendingStat.isDirectory() || pendingStat.isSymbolicLink() || (process.platform !== 'win32' && (pendingStat.mode & 0o077) !== 0))
+    throw new Error('Pending results directory must be private and cannot be a link.');
   const rgExecutable = process.platform === 'win32' ? 'rg.exe' : 'rg';
   const ripgrep = cfg.ripgrep
     ? (diagnostics ? cfg.ripgrep : await realpath(cfg.ripgrep))
@@ -89,6 +94,6 @@ export async function resolveAgentConfig(contents: unknown, configFile: string, 
   if (!diagnostics && ripgrep && (inside(workspace, ripgrep) || !(await lstat(ripgrep)).isFile()))
     throw new Error('ripgrep must point to a trusted executable outside the workspace.');
   const chromePath = cfg.chromePath ?? await findExecutable(chromeCandidates(), workspace);
-  return { ...cfg, origin: endpoint(cfg.gateway, cfg.allowInsecureLoopback).origin, workspace, stateDir, approvals, ripgrep, chromePath };
+  return { ...cfg, origin: endpoint(cfg.gateway, cfg.allowInsecureLoopback).origin, workspace, stateDir, approvals, pendingResults, ripgrep, chromePath };
 }
 export type AgentConfig = Awaited<ReturnType<typeof loadConfig>>;

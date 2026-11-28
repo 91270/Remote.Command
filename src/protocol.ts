@@ -53,12 +53,32 @@ export const live = ['dispatched', 'awaiting_approval', 'running'] as const;
 export const terminal = ['succeeded', 'failed', 'denied', 'cancelled', 'timed_out', 'interrupted'] as const;
 export const update = z.strictObject({
   id: uuid, seq: z.number().int().positive(), status: z.enum(['awaiting_approval', 'running', ...terminal]),
-  output: z.string().max(40000).optional(), result: coreResult.optional()
+  output: z.string().max(40000).optional(), result: coreResult.optional(), boot: uuid.optional()
 });
 export type Update = z.infer<typeof update>;
 export const work = z.strictObject({ id: uuid, op: z.enum(names as [Op, ...Op[]]), args: z.record(z.string(), z.unknown()) });
 export type Work = z.infer<typeof work>;
-export const sync = z.strictObject({ boot: uuid, platform: z.enum(['darwin', 'win32', 'linux']), updates: z.array(update).max(8), catalog: catalog.optional(), ready: z.boolean().optional() });
+export const maxBody = 40 * 1024 * 1024;
+export const maxActive = 4;
+export const maxWaiting = 64;
+export const maxUserActive = 8;
+export const maxUserWaiting = 128;
+export const approvalMs = 300_000;
+export const offlineMs = 15_000;
+export const defaultLongPollMs = 25_000;
+export const maxLongPollMs = 30_000;
+export const defaultSyncWaitMs = 15_000;
+export const maxSyncWaitMs = 55_000;
+export const defaultTaskLeaseMs = 6 * 60_000;
+export const maxTaskLifetimeMs = 60 * 60_000;
+export const sync = z.strictObject({
+  boot: uuid,
+  platform: z.enum(['darwin', 'win32', 'linux']),
+  updates: z.array(update).max(8),
+  catalog: catalog.optional(),
+  ready: z.boolean().optional(),
+  waitMs: z.number().int().min(0).max(maxLongPollMs).optional()
+});
 export const syncReply = z.strictObject({
   jobs: z.array(work).max(8),
   cancel: z.array(uuid).max(8),
@@ -68,11 +88,6 @@ export const syncReply = z.strictObject({
   deviceName: z.string().max(128).optional(),
   userEmail: z.string().max(256).optional()
 });
-export const maxBody = 40 * 1024 * 1024;
-export const maxActive = 4;
-export const maxWaiting = 64;
-export const approvalMs = 300_000;
-export const offlineMs = 15_000;
 export const clip = (s: string) => s.length > 39000 ? s.slice(0, 39000) + '\n[output truncated]' : s;
 export const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
 

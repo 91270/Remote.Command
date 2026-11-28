@@ -73,7 +73,7 @@ docker compose logs --tail 50 gateway
 1. 将 [Nginx 站点示例](../deploy/nginx/remote-command.conf) 复制到宿主机 Nginx 已启用站点目录（如 `/etc/nginx/conf.d/remote-command.conf`），将 `server_name`、`ssl_certificate`、`ssl_certificate_key` 替换为你的生产域名与证书路径。
 2. 示例已包含以下关键配置：
    - `client_max_body_size 40m;`：与 Gateway 的 40 MiB 同步体积上限一致。
-   - `proxy_buffering off;`、`proxy_cache off;`：保障 MCP 流式响应与心跳实时透传。
+   - `proxy_buffering off;`、`proxy_cache off;`、`proxy_read_timeout 65s;`：保障 MCP 流式响应与 25s `/device/sync` HTTP Long Polling 长连接稳定透传不超时。
    - 完整保留 `Host`、`X-Forwarded-Proto`、`X-Forwarded-For`、`X-Real-IP` 请求头。
 3. **宝塔等面板用户必看**：若已有通用静态规则（如 `location ~ \.well-known`），会截获 OAuth 自动发现请求并返回 404，务必添加优先前缀规则将 `/.well-known/oauth-` 转发给 Gateway：
 
@@ -242,6 +242,7 @@ docker compose up -d --wait gateway
 | **HTTPS 与 OAuth** | 确认 TLS 证书有效，`/.well-known/oauth-protected-resource/mcp` 指向你的 HTTPS Gateway，且 `/auth/google/start` 能正常重定向到 Google 授权页。 |
 | **日志与磁盘** | 执行 `docker compose logs --tail 100 gateway`，查看限流或上游 OIDC 错误；检查宿主机 Nginx 日志与备份磁盘空间。 |
 | **数据保留策略** | 终态任务正文（`args` / `output` / `mcp_result`）默认保留 **30 分钟**（`RCM_RESULT_TTL_MINUTES`，设为 `0` 可关闭提前清理），到期后仅保留任务元数据（默认 **7 天**，`RCM_TASK_RETENTION_DAYS`）；脱敏用量元数据（`usage_events`，不含参数与输出正文）默认保留 **210 天**以支撑近 6 个月趋势统计，审计日志默认保留 **90 天**（`RCM_AUDIT_RETENTION_DAYS`），DCR 注册客户端默认保留 **30 天**（`RCM_DCR_CLIENT_TTL_DAYS`），均可在环境配置中调整。 |
+| **长轮询与背压策略** | `/device/sync` 默认启用 **HTTP Long Polling**（`RCM_LONG_POLL_MS=25000`，兼容旧版短轮询 Agent），Gateway 同步等待窗口默认 **15 秒**（`RCM_SYNC_WAIT_MS=15000`），长任务执行租约默认 **6 分钟**并由 Agent 自动续期（`RCM_TASK_LEASE_MS=360000`）；多租户按用户默认并发上限 `RCM_MAX_USER_ACTIVE=8`、排队上限 `RCM_MAX_USER_WAITING=128`。 |
 | **月度软配额告警** | 可选配置 `RCM_MONTHLY_SOFT_QUOTA`（正整数；未配置或 `0` 表示关闭）。当月调用量达到 **80%** 阈值时，`/manage` 控制台与 `who_am_i` 工具将返回非阻断软告警（默认不阻断任何自建工具调用）。 |
 | **Free / Pro 套餐与兑换码** | 普通用户默认为 **Free（10,000 次有效设备调用/月，每月 1 日 00:00 UTC 重置）**；到达设备并完成执行的工具/资源调用计 1 次，控制工具与失败超时不计次。达 80% 返回提醒，达 100% 暂停新设备调用（保持设备配对不断开，`who_am_i` / `list_devices` 仍可用）。用户可在 `/manage`「套餐与计费」输入 **Pro 兑换码**（月卡/季卡/年卡/永久卡）自助升级，限时 Pro 到期自动降级回 Free。 |
 | **管理员后台治理** | `role = admin` 账号登录 `/manage` 后可使用专属「管理后台」分组（全站概览、用户与套餐、邀请码与兑换码、全站设备与审计、系统策略），支持用户启停、强制踢下线、一键调整套餐/单用户配额、批量生成与作废邀请码/Pro 兑换码、跨租户紧急撤销设备以及在线调整注册策略、Free 默认配额与正文保留时长（所有 `/manage/api/admin/*` 接口对非管理员返回 `403`）。 |

@@ -2,7 +2,6 @@ import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync }
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { setTimeout as delay } from 'node:timers/promises';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, ListResourceTemplatesRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -14,9 +13,14 @@ import { OAuth } from './oauth.js';
 import { GoogleAuth } from './google-auth.js';
 import { RateLimiter, ipDigest } from './rate-limit.js';
 import { Store, evaluateMonthlySoftQuota } from './store.js';
+import { SyncHub } from './sync-hub.js';
 import { Dashboard } from './dashboard.js';
 import { DeviceFlow } from './device-flow.js';
-import { dcCapability, endpoint, uuid, sync, errorText, terminal, catalog, projectVersion, secret } from './protocol.js';
+import {
+  dcCapability, endpoint, uuid, sync, errorText, terminal, catalog, projectVersion, secret,
+  defaultLongPollMs, maxLongPollMs, defaultSyncWaitMs, maxSyncWaitMs,
+  maxUserActive, maxUserWaiting, defaultTaskLeaseMs, maxTaskLifetimeMs
+} from './protocol.js';
 
 const env = process.env;
 function runtimeSecret(value: string | undefined, file: string | undefined, persistentFile: string) {
@@ -63,11 +67,22 @@ function resultTtl(value: string | undefined, fallback: number, max: number): nu
   if (!Number.isSafeInteger(minutes) || minutes < 0 || minutes > max) throw new Error('Invalid RCM_RESULT_TTL_MINUTES.');
   return minutes;
 }
+function boundedInt(value: string | undefined, fallback: number, min: number, max: number, name: string): number {
+  if (value === undefined || value.trim() === '') return fallback;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < min || n > max) throw new Error(`Invalid ${name}.`);
+  return n;
+}
 const taskDays = retention(env.RCM_TASK_RETENTION_DAYS, 7, 365);
 const auditDays = retention(env.RCM_AUDIT_RETENTION_DAYS, 90, 3650);
 const dcrClientDays = retention(env.RCM_DCR_CLIENT_TTL_DAYS, 30, 3650);
 const resultTtlMinutes = resultTtl(env.RCM_RESULT_TTL_MINUTES, 30, 525600);
 const monthlySoftQuota = optionalPositiveInt(env.RCM_MONTHLY_SOFT_QUOTA, 10_000_000, 'RCM_MONTHLY_SOFT_QUOTA');
+const syncWaitMs = boundedInt(env.RCM_SYNC_WAIT_MS, defaultSyncWaitMs, 0, maxSyncWaitMs, 'RCM_SYNC_WAIT_MS');
+const longPollMs = boundedInt(env.RCM_LONG_POLL_MS, defaultLongPollMs, 0, maxLongPollMs, 'RCM_LONG_POLL_MS');
+const configuredMaxUserActive = boundedInt(env.RCM_MAX_USER_ACTIVE, maxUserActive, 1, 256, 'RCM_MAX_USER_ACTIVE');
+const configuredMaxUserWaiting = boundedInt(env.RCM_MAX_USER_WAITING, maxUserWaiting, 1, 2048, 'RCM_MAX_USER_WAITING');
+const taskLeaseMs = boundedInt(env.RCM_TASK_LEASE_MS, defaultTaskLeaseMs, 1000, maxTaskLifetimeMs, 'RCM_TASK_LEASE_MS');
 const origin = endpoint(env.PUBLIC_ORIGIN ?? '', env.ALLOW_INSECURE_LOOPBACK === '1').origin;
 const bindHost = env.BIND_HOST ?? '127.0.0.1';
 if (origin.startsWith('http:') && bindHost !== '127.0.0.1') throw new Error('Plaintext test Gateway must bind to 127.0.0.1.');
@@ -99,7 +114,19 @@ const clientSecret = env.OAUTH_CLIENT_ID
   ? runtimeSecret(env.OAUTH_CLIENT_SECRET, env.OAUTH_CLIENT_SECRET_FILE, join(stateDirectory, '.oauth_client_secret'))
   : undefined;
 const ownerKey = runtimeSecret(env.OWNER_KEY, env.OWNER_KEY_FILE, join(stateDirectory, '.owner_key'));
-const store = new Store(stateFile);
+const syncHub = new SyncHub();
+const store = new Store(stateFile, {
+  hooks: {
+    isDeviceConnected: (deviceId, boot) => syncHub.hasActiveWaiter(deviceId, boot),
+    onDeviceWake: deviceId => { syncHub.wakeDevice(deviceId, 'event'); },
+    onTaskEvent: taskId => { syncHub.notifyTask(taskId); }
+  },
+  limits: {
+    maxUserActive: configuredMaxUserActive,
+    maxUserWaiting: configuredMaxUserWaiting,
+    taskLeaseMs
+  }
+});
 if (store.userCount() === 0) {
   logger.info(
     adminGoogleEmails.size > 0
@@ -175,12 +202,14 @@ function mcp(accessToken: string, userId?: string) {
     throw new Error('Choose a device using device_id or select_device after calling list_devices.');
   }
   async function waitForTask(id: string, signal: AbortSignal) {
-    for (let i = 0; i < 24; i++) {
-      const task = store.task(id, userId)!;
-      if (terminal.some(status => status === task.status)) return task;
-      await delay(200, undefined, { signal });
-    }
-    return store.task(id, userId)!;
+    const task = await syncHub.waitForTaskEvent(
+      id,
+      () => store.task(id, userId),
+      current => terminal.some(status => status === current.status) || current.status === 'awaiting_approval',
+      syncWaitMs,
+      signal
+    );
+    return task ?? store.task(id, userId)!;
   }
   const remoteControls: Tool[] = [
     { name: 'shutdown', description: 'Disconnect the selected remote Agent after local approval. Use only when asked to stop remote access. Restart locally to reconnect.',
@@ -361,7 +390,7 @@ function mcp(accessToken: string, userId?: string) {
 }
 const key = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 let draining = false;
-const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, async (req, res) => {
+const server = createServer({ requestTimeout: 65000, headersTimeout: 10000 }, async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   try {
     const url = new URL(req.url ?? '/', origin);
@@ -396,8 +425,47 @@ const server = createServer({ requestTimeout: 20000, headersTimeout: 10000 }, as
       const token = bearer(req), dev = token && store.deviceByToken(token);
       if (!dev) return json(res, 401, { error: 'Device is not authorized.' });
       const p = sync.parse(await readJson(req));
-      const reply = store.sync(dev.id, p.boot, p.platform, p.updates, p.catalog, p.ready);
-      return reply ? json(res, 200, reply) : json(res, 409, { error: 'Agent instance was replaced or revoked.' });
+      const initialReply = store.sync(dev.id, p.boot, p.platform, p.updates, p.catalog, p.ready);
+      if (!initialReply) return json(res, 409, { error: 'Agent instance was replaced or revoked.' });
+
+      const effectiveWaitMs = Math.min(p.waitMs ?? 0, longPollMs);
+      const hasImmediatePayload =
+        p.ready === false ||
+        p.updates.length > 0 ||
+        Boolean(p.catalog) ||
+        initialReply.jobs.length > 0 ||
+        initialReply.cancel.length > 0 ||
+        initialReply.ack.length > 0;
+      if (effectiveWaitMs <= 0 || draining || hasImmediatePayload) {
+        return json(res, 200, initialReply);
+      }
+
+      req.socket?.setKeepAlive(true, 10_000);
+      const waitAbort = new AbortController();
+      const onClose = () => {
+        if (!res.writableEnded) waitAbort.abort();
+      };
+      res.once('close', onClose);
+      try {
+        const reason = await syncHub.waitForDevice(dev.id, p.boot, true, effectiveWaitMs, waitAbort.signal);
+        if (res.writableEnded || res.destroyed || waitAbort.signal.aborted) return;
+        if (reason === 'shutdown' || draining) return json(res, 200, initialReply);
+        if (reason === 'superseded') {
+          return json(res, 200, {
+            jobs: [],
+            cancel: [],
+            ack: [],
+            approvalMode: initialReply.approvalMode,
+            ...(initialReply.deviceName ? { deviceName: initialReply.deviceName } : {}),
+            ...(initialReply.capabilities ? { capabilities: initialReply.capabilities } : {})
+          });
+        }
+        if (!store.deviceByToken(token)) return json(res, 401, { error: 'Device is not authorized.' });
+        const fresh = store.sync(dev.id, p.boot, p.platform, [], undefined, true);
+        return fresh ? json(res, 200, fresh) : json(res, 409, { error: 'Agent instance was replaced or revoked.' });
+      } finally {
+        res.off('close', onClose);
+      }
     }
     if (url.pathname === '/mcp') {
       const auth = oauth.authenticateAccess(req);
@@ -431,6 +499,7 @@ server.listen(Number(env.PORT ?? 8787), bindHost, () => {
 function shutdown() {
   if (draining) return;
   draining = true;
+  syncHub.wakeAll('shutdown');
   clearInterval(cleanup);
   store.maintain(taskDays, auditDays, dcrClientDays, 210, store.getResultTtlMinutes(resultTtlMinutes));
   const force = setTimeout(() => server.closeAllConnections(), 20000);
